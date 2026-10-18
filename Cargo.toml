@@ -13,7 +13,7 @@ serde_json = "1"
 
 [dev-dependencies]
 handl-runtime = { git = "https://github.com/handl-lang/host", branch = "main" }
-handl-kit-data-canonical = { git = "https://github.com/handl-lang/lang", branch = "main" }
+handl-kit-data-canonical = { git = "https://github.com/handl-lang/kit-data-canonical", branch = "main" }
 serde_json = "1"
 criterion = "0.5"
 
@@ -71,8 +71,8 @@ handl-value = { path = "../kernel/crates/handl-value" }
 handl-kit-canonical = { path = "../kit-canonical/crates/kit-canonical" }
 handl-plugin-ffi = { path = "../kit-canonical/modules/ffi" }
 
-[patch."https://github.com/handl-lang/lang"]
-handl-kit-data-canonical = { path = "../lang/crates/handl-kit-data-canonical" }
+[patch."https://github.com/handl-lang/kit-data-canonical"]
+handl-kit-data-canonical = { path = "../kit-data-canonical/crates/handl-kit-data-canonical" }
 
 [patch."https://github.com/handl-lang/lib-archive"]
 handl-lib-archive = { path = "../lib-archive" }
