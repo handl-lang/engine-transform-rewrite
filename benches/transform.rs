@@ -12,7 +12,7 @@
 
 use criterion::{Criterion, black_box, criterion_group, criterion_main};
 use handl_language::{Ast, AstNode, Language};
-use handl_plugin_engine_transform_rewrite::RewriteEngine;
+use hnl_engine_transform_rewrite::RewriteEngine;
 use serde_json::json;
 
 const NODES: usize = 10_000;

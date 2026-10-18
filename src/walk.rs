@@ -28,8 +28,8 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use handl_language::{Ast, AstNode, AstRef, LangError, Language, TransformDef, TransformRule};
-use handl_plugin_engine_transform::native::{NativeRewrite, RewriteCtx};
-use handl_plugin_engine_transform::output::{PassStats, Rewrite, RewriteTrace};
+use hnl_engine_transform::native::{NativeRewrite, RewriteCtx};
+use hnl_engine_transform::output::{PassStats, Rewrite, RewriteTrace};
 
 use crate::condition::matches_condition;
 use crate::dispatch::Dispatch;

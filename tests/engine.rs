@@ -8,10 +8,10 @@ use handl_language::{
     Ast, AstNode, AstRef, AstShapeDef, ChildRoleSpec, Language, RewriteStep, TransformCondition,
     TransformDef, TransformRule,
 };
-use handl_plugin_engine_transform::TransformEngine;
-use handl_plugin_engine_transform::native::{NativeRewriteRegistry, RewriteCtx};
-use handl_plugin_engine_transform::request::{TransformMode, TransformRequest};
-use handl_plugin_engine_transform_rewrite::{RewriteEngine, Traversal};
+use hnl_engine_transform::TransformEngine;
+use hnl_engine_transform::native::{NativeRewriteRegistry, RewriteCtx};
+use hnl_engine_transform::request::{TransformMode, TransformRequest};
+use hnl_engine_transform_rewrite::{RewriteEngine, Traversal};
 use serde_json::{Value, json};
 use std::sync::Arc;
 

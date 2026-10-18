@@ -5,7 +5,7 @@
 
 use handl_kit_data_canonical::language_from_yaml;
 use handl_language::{Ast, AstNode, AstRef, Language};
-use handl_plugin_engine_transform_rewrite::RewriteEngine;
+use hnl_engine_transform_rewrite::RewriteEngine;
 use serde_json::{Value, json};
 
 fn canonical() -> Language {

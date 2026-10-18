@@ -1,4 +1,4 @@
-//! # handl-plugin-engine-transform-rewrite
+//! # hnl-engine-transform-rewrite
 //!
 //! The first [`TransformEngine`] implementation (ADR-0094): a
 //! rule-interpreting rewriting engine that generalizes the legacy
@@ -25,7 +25,7 @@
 
 /// [`TransformCondition`](handl_language::TransformCondition) evaluation —
 /// shared by this engine and by other consumers of the predicate vocabulary
-/// (e.g. `plugin-engine-lint` `Match` lint rules, ADR-0097).
+/// (e.g. `hnl-engine-lint` `Match` lint rules, ADR-0097).
 pub mod condition;
 mod dispatch;
 pub mod native;
@@ -37,11 +37,11 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use handl_language::{Ast, AstRef, LangError, Language};
-use handl_plugin_engine_transform::native::{NativeRewrite, RewriteCtx};
-use handl_plugin_engine_transform::output::{Rewrite, RewriteTrace, TransformOutput};
-use handl_plugin_engine_transform::request::{TransformMode, TransformRequest};
-use handl_plugin_engine_transform::source::{LanguageRuleSource, RuleSource};
-use handl_plugin_engine_transform::{Match, TransformEngine};
+use hnl_engine_transform::native::{NativeRewrite, RewriteCtx};
+use hnl_engine_transform::output::{Rewrite, RewriteTrace, TransformOutput};
+use hnl_engine_transform::request::{TransformMode, TransformRequest};
+use hnl_engine_transform::source::{LanguageRuleSource, RuleSource};
+use hnl_engine_transform::{Match, TransformEngine};
 
 use crate::condition::matches_condition;
 use crate::dispatch::Dispatch;
@@ -152,9 +152,9 @@ impl RewriteEngine {
         // the bootstrap/fallback layer).
         let base: Arc<dyn NativeRewrite> = Arc::new(native::desugar_native_registry());
         let natives: Arc<dyn NativeRewrite> =
-            match handl_plugin_engine_transform::native::transform_overlay() {
+            match hnl_engine_transform::native::transform_overlay() {
                 Some(overlay) => Arc::new(
-                    handl_plugin_engine_transform::native::ChainedRewrite::new(vec![
+                    hnl_engine_transform::native::ChainedRewrite::new(vec![
                         overlay, base,
                     ]),
                 ),
@@ -268,7 +268,7 @@ impl RewriteEngine {
         let mut cur_ast = ast.clone();
         let mut cur_root = root;
         let mut trace = RewriteTrace::new();
-        let mut stats = handl_plugin_engine_transform::output::PassStats::new();
+        let mut stats = hnl_engine_transform::output::PassStats::new();
         for pass in passes {
             let out = self.run_pass(lang, &cur_ast, cur_root, pass)?;
             cur_ast = out.ast;
@@ -447,7 +447,7 @@ impl RewriteEngine {
         let mut cur_ast = ast.clone();
         let mut cur_root = root;
         let mut trace = RewriteTrace::new();
-        let mut stats = handl_plugin_engine_transform::output::PassStats::new();
+        let mut stats = hnl_engine_transform::output::PassStats::new();
         for _iteration in 0..max {
             if cur_ast.len() > self.node_budget {
                 return Err(LangError::engine(format!(
@@ -545,7 +545,7 @@ impl TransformEngine for RewriteEngine {
                 // output is the input unchanged; each match is recorded as
                 // a `Rewrite { from == to }` proposal.
                 let matches = self.find_matches(lang, &req.ast, req.root, req.pass());
-                let mut stats = handl_plugin_engine_transform::output::PassStats::new();
+                let mut stats = hnl_engine_transform::output::PassStats::new();
                 stats.visited = req.ast.len();
                 let rewrites = matches
                     .into_iter()

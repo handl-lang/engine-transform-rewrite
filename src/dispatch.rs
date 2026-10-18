@@ -9,7 +9,7 @@
 use std::collections::HashMap;
 
 use handl_language::{Language, TransformDef};
-use handl_plugin_engine_transform::source::RuleSource;
+use hnl_engine_transform::source::RuleSource;
 
 /// The dispatch table for a single pass.
 ///

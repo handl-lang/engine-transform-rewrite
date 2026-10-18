@@ -13,7 +13,7 @@
 //! declarative `AstShapeDef::desugar` dispatch.
 
 use handl_language::{Ast, AstNode, AstRef, LangError, Language};
-use handl_plugin_engine_transform::native::{NativeRewriteRegistry, RewriteCtx};
+use hnl_engine_transform::native::{NativeRewriteRegistry, RewriteCtx};
 use serde_json::Value;
 use std::collections::HashMap;
 use std::sync::OnceLock;
