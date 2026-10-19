@@ -3,7 +3,7 @@ name = "hnl-engine-transform-rewrite"
 version = "0.1.0"
 edition = "2024"
 description = "The first [`TransformEngine`] implementation (ADR-0094): a rule-interpreting rewriting engine that generalizes the legacy `handl-runtime::desugar_pass` machinery."
-license = "MIT OR Apache-2.0"
+license = "MIT"
 repository = "https://github.com/handl-lang/engine-transform-rewrite"
 
 [dependencies]
