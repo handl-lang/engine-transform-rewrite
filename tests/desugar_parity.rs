@@ -3,7 +3,7 @@
 //! `handl_runtime::desugar_pass::apply_desugar`, and desugar must be
 //! idempotent: `desugar(desugar(x)) == desugar(x)`.
 
-use handl_kit_data_canonical::language_from_yaml;
+use handl_kit_data_prelude::language_from_yaml;
 use handl_language::{Ast, AstNode, AstRef, Language};
 use hnl_engine_transform_rewrite::RewriteEngine;
 use serde_json::{Value, json};

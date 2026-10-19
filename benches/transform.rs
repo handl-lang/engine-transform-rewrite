@@ -18,7 +18,7 @@ use serde_json::json;
 const NODES: usize = 10_000;
 
 fn canonical_lang() -> Language {
-    handl_kit_data_canonical::language_from_yaml().expect("canonical language should assemble")
+    handl_kit_data_prelude::language_from_yaml().expect("canonical language should assemble")
 }
 
 /// Push `value` leaves and combine them under `kind`, until the arena holds
