@@ -1013,21 +1013,169 @@ fn occurs_in(expr: &TypeExpr, type_name: &str) -> bool {
     }
 }
 
-/// Desugar a `data` declaration into a `block` of definitions:
-/// the predicate, each constructor, and the recursor (ADR-0082 §1,
-/// extended for Phase 6.3 inductive families).
+/// Push a `lit` leaf carrying a serialized seeded `sym` — the
+/// `{"__sym__": {"handle": …, "name": …, "parent": null}}` encoding
+/// `TaggedValue::from` decodes back into a `Sym` at eval time. The seed
+/// makes the nominal deterministic (ADR-0154 §1): every module that
+/// desugars `data Nat` produces the *same* former/ctor identity.
+fn push_sym_lit(out: &mut Ast, seed: &str) -> usize {
+    let sym = handl_value::Sym::seeded(seed);
+    let tv = handl_value::TaggedValue::Sym(sym);
+    push_leaf(out, "lit", handl_value::tagged_to_value(&tv))
+}
+
+/// The deterministic seed for a `data` former (ADR-0154 §1).
+fn former_seed(type_name: &str) -> String {
+    format!("data.{type_name}")
+}
+
+/// The deterministic seed for a `data` constructor nominal.
+fn ctor_seed(type_name: &str, cons_name: &str) -> String {
+    format!("data.{type_name}.{cons_name}")
+}
+
+/// `{"__former__": <fSym lit>, "indices": [<idx nodes>]}` — the canonical
+/// family-application object of ADR-0152 §1.
+fn push_family_app(out: &mut Ast, type_name: &str, index_nodes: Vec<usize>) -> usize {
+    let sym = push_sym_lit(out, &former_seed(type_name));
+    let indices = push_node(out, "array", index_nodes);
+    push_object_node(out, &[("__former__", sym), ("indices", indices)])
+}
+
+/// For each family param, find a runtime extractor: the first recursive
+/// ctor field whose declared type is `App(type_name, idx_exprs)` and whose
+/// `j`-th index is exactly the param's atom yields
+/// `<field>.type.indices[j]` — the family's declared index is recovered
+/// from the recursive field's own `type` link (ADR-0154 §2). Params with
+/// no extractor (implicit indices, e.g. `Dbl`'s `n` in
+/// `MkDbl(x) : Dbl(2 * n)`) get `None` — their index is type-level only.
+fn param_extractors(
+    out: &mut Ast,
+    type_name: &str,
+    params: &[DataParam],
+    cons: &DataConstructor,
+) -> Vec<Option<usize>> {
+    let mut vals: Vec<Option<usize>> = vec![None; params.len()];
+    for (arg_name, arg_type) in &cons.args {
+        let mut parser = TypeExprParser::new(arg_type);
+        let Some(expr) = parser.parse() else {
+            continue;
+        };
+        let TypeExpr::App(name, idx_exprs) = &expr else {
+            continue;
+        };
+        if name != type_name {
+            continue;
+        }
+        for (j, p) in params.iter().enumerate() {
+            if vals[j].is_some() {
+                continue;
+            }
+            if matches!(idx_exprs.get(j), Some(TypeExpr::Atom(a)) if a == &p.name) {
+                let arg_var = push_var_node(out, arg_name);
+                let ty = push_fa(out, arg_var, "type");
+                let indices = push_fa(out, ty, "indices");
+                vals[j] = Some(push_fai(out, indices, j));
+            }
+        }
+    }
+    vals
+}
+
+/// Whether a type expression mentions a family param that has no runtime
+/// extractor — such an index cannot be computed in the value world and
+/// must lower to `null` (the index is type-level only; the checker's
+/// `ctor_sig` instantiation carries the real equation).
+fn mentions_unresolved(expr: &TypeExpr, params: &[DataParam], vals: &[Option<usize>]) -> bool {
+    match expr {
+        TypeExpr::Atom(s) => params
+            .iter()
+            .enumerate()
+            .any(|(j, p)| &p.name == s && vals[j].is_none()),
+        TypeExpr::App(_, args) => args.iter().any(|a| mentions_unresolved(a, params, vals)),
+        TypeExpr::Func(d, c) => {
+            mentions_unresolved(d, params, vals) || mentions_unresolved(c, params, vals)
+        }
+        TypeExpr::Op(_, l, r) => {
+            mentions_unresolved(l, params, vals) || mentions_unresolved(r, params, vals)
+        }
+    }
+}
+
+/// Compile a result-index type expression to an AST node producing its
+/// runtime value: literals, param extractors, and arithmetic ops.
+/// An expression mentioning an unresolved param lowers to `lit null`
+/// (type-level index — not computable from the fields).
+fn index_expr_to_ast(
+    out: &mut Ast,
+    expr: &TypeExpr,
+    params: &[DataParam],
+    vals: &[Option<usize>],
+) -> usize {
+    if mentions_unresolved(expr, params, vals) {
+        return push_null_node(out);
+    }
+    match expr {
+        TypeExpr::Atom(s) => {
+            if let Ok(n) = s.parse::<i64>() {
+                push_leaf(out, "value", Value::from(n))
+            } else if s.parse::<f64>().is_ok() {
+                push_leaf(out, "value", Value::from(s.as_str()))
+            } else if let Some(j) = params.iter().position(|p| p.name == *s) {
+                vals[j].unwrap_or_else(|| push_null_node(out))
+            } else {
+                push_leaf(out, "var", Value::from(s.clone()))
+            }
+        }
+        TypeExpr::App(name, args) => {
+            let callee = push_leaf(out, "var", Value::from(name.clone()));
+            let mut children = vec![callee];
+            for arg in args {
+                children.push(index_expr_to_ast(out, arg, params, vals));
+            }
+            push_node(out, "call", children)
+        }
+        TypeExpr::Func(domain, codomain) => {
+            let arrow = push_leaf(out, "var", Value::from("->"));
+            let lhs = index_expr_to_ast(out, domain, params, vals);
+            let rhs = index_expr_to_ast(out, codomain, params, vals);
+            push_node(out, "call", vec![arrow, lhs, rhs])
+        }
+        TypeExpr::Op(op, lhs, rhs) => {
+            let kind = match op.as_str() {
+                "+" => "binary.add",
+                "-" => "binary.sub",
+                "*" => "binary.mul",
+                "/" => "binary.div",
+                "%" => "binary.mod",
+                _ => "binary.add",
+            };
+            let l = index_expr_to_ast(out, lhs, params, vals);
+            let r = index_expr_to_ast(out, rhs, params, vals);
+            push_node(out, kind, vec![l, r])
+        }
+    }
+}
+
+/// Desugar a `data` declaration into a `block` of definitions per
+/// ADR-0152: `F` binds a seeded-sym nominal former, each constructor is a
+/// nominal arrow producing a `{"__ctor__": cSym, …}` object carrying a
+/// `type` link to `F(j⃗)`, and `F.rec` is the dependent eliminator whose
+/// iota reduction is the recursor fold machine.
 ///
-/// `data Vec(n : Nat, a : Type) = Nil | Cons(a, Vec(n - 1, a))` desugars
-/// to a `block` containing:
-/// - `Vec = (n, a, v) -> (v.tag == "Nil" and n == 0) or
-///     (v.tag == "Cons" and Vec(n - 1, a)(v.xs))`
-/// - `Nil = { tag: "Nil" }`
-/// - `Cons = (x, xs) -> { tag: "Cons", x: x, xs: xs }`
-/// - `Vec.rec = (motive, base, step) -> (n, a, v) -> ...`
+/// `data Vec(n : Nat, a : Type) :: VNil : Vec(0, a) | VCons(x : a, xs : Vec(n, a)) : Vec(n + 1, a)`
+/// desugars to a `block` containing:
+/// - `Vec = (n, a) -> {"__former__": vecSym, "indices": [n, a]}`
+/// - `VNil = {"__ctor__": vnilSym, "type": {"__former__": vecSym, "indices": [0, null]}}`
+/// - `VCons = (x, xs) -> {"__ctor__": vconsSym, "x": x, "xs": xs,
+///     "type": {"__former__": vecSym, "indices": [xs.type.indices[0] + 1, xs.type.indices[1]]}}`
+/// - `Vec.rec = (motive, cVNil, cVCons) -> <fold, decreasing on the ctor spine>`
 fn desugar_data(lang: &Language, original: &AstNode, ast: &Ast, out: &mut Ast) -> Option<AstRef> {
     let (type_name, params, constructors) = parse_data_payload(lang, original, ast)?;
 
-    // Step 2: strict positivity check.
+    // Strict positivity — an early mirror of the check the typechecker's
+    // `synth_data` owns (ADR-0152: the checker sees the ctor signatures;
+    // this native pass stays as the bootstrap surface diagnostic).
     if let Err(reason) = check_strict_positivity(&type_name, &constructors) {
         let err_payload = serde_json::json!({
             "kind": "data-error",
@@ -1039,61 +1187,61 @@ fn desugar_data(lang: &Language, original: &AstNode, ast: &Ast, out: &mut Ast) -
 
     let mut stmts: Vec<usize> = Vec::new();
 
-    // 1. Predicate: Type = (params.., __v) -> loop(__in, pred_step)
-    //
-    // The predicate keeps the family's declared arity so a call
-    // `Type(p.., v)` binds positionally (`apply_app` curries surplus args,
-    // so a single `__in` parameter would capture only the first). The
-    // loop input is the flat `__in` tuple `[params.., v]` the fold
-    // machine indexes — or the bare `__v` for parameter-free types. The
-    // fold machine — see `build_fold_step_fn` — replaces the former
-    // `self(self)` recursive predicate with `Term::Loop` feedback.
-    let pred_step =
-        build_fold_step_fn(out, FoldMode::Predicate, &type_name, &params, &constructors);
-    let mut pred_params: Vec<String> = params.iter().map(|p| p.name.clone()).collect();
-    pred_params.push("__v".to_string());
-    let pred_loop_in = if params.is_empty() {
-        push_var_node(out, "__v")
+    // 1. The former: `F` binds the family's nominal identity.
+    //    `F(i⃗)` produces the canonical `{"__former__": fSym, "indices": i⃗}`
+    //    object — family equality is nominal head + structural indices
+    //    (ADR-0152 §1), not a predicate-arrow membership test.
+    let index_vars: Vec<usize> = params
+        .iter()
+        .map(|p| push_var_node(out, &p.name))
+        .collect();
+    let former_obj = push_family_app(out, &type_name, index_vars);
+    let f_value = if params.is_empty() {
+        former_obj
     } else {
-        let elems: Vec<usize> = pred_params.iter().map(|n| push_var_node(out, n)).collect();
-        push_node(out, "array", elems)
+        let pref: Vec<&str> = params.iter().map(|p| p.name.as_str()).collect();
+        push_function(out, &pref, former_obj)
     };
-    let pred_loop = push_node(out, "loop", vec![pred_loop_in, pred_step]);
-    let pred_param_refs: Vec<&str> = pred_params.iter().map(|s| s.as_str()).collect();
-    let pred_fn = push_function(out, &pred_param_refs, pred_loop);
-    let pred_target = push_leaf(out, "var", Value::from(type_name.clone()));
-    let pred_assign = push_node(out, "assign", vec![pred_target, pred_fn]);
-    stmts.push(pred_assign);
+    let f_target = push_leaf(out, "var", Value::from(type_name.clone()));
+    stmts.push(push_node(out, "assign", vec![f_target, f_value]));
 
-    // 2. Constructors.
+    // 2. Constructors — nominal arrows into the family. `Cⱼ(x⃗)` produces
+    //    `{"__ctor__": cSym, x⃗…, "type": F(j⃗)}`: identity is the sym
+    //    (match dispatches on it, never a `{"tag"}` string) and the
+    //    `type` link is the declared membership (ADR-0154 §2).
     for cons in &constructors {
-        let cons_target = push_leaf(out, "var", Value::from(cons.name.clone()));
+        let ctor_sym = push_sym_lit(out, &ctor_seed(&type_name, &cons.name));
+        let param_vals = param_extractors(out, &type_name, &params, cons);
+        let mut index_nodes: Vec<usize> = Vec::with_capacity(params.len());
+        for (j, _) in params.iter().enumerate() {
+            let idx = match cons.result_indices.get(j).and_then(|r| r.as_ref()) {
+                Some(expr_str) => {
+                    let mut parser = TypeExprParser::new(expr_str);
+                    match parser.parse() {
+                        Some(expr) => index_expr_to_ast(out, &expr, &params, &param_vals),
+                        None => push_null_node(out),
+                    }
+                }
+                None => param_vals[j].unwrap_or_else(|| push_null_node(out)),
+            };
+            index_nodes.push(idx);
+        }
+        let type_link = push_family_app(out, &type_name, index_nodes);
+        let mut fields: Vec<(&str, usize)> = vec![("__ctor__", ctor_sym)];
+        for (arg_name, _) in &cons.args {
+            let v = push_var_node(out, arg_name);
+            fields.push((arg_name.as_str(), v));
+        }
+        fields.push(("type", type_link));
+        let obj = push_object_node(out, &fields);
         let cons_value = if cons.args.is_empty() {
-            push_leaf(out, "lit", serde_json::json!({ "tag": cons.name }))
+            obj
         } else {
-            let arg_vars: Vec<usize> = cons
-                .args
-                .iter()
-                .map(|(name, _)| push_leaf(out, "var", Value::from(name.clone())))
-                .collect();
-            let mut template = String::from("{\"tag\": ");
-            template.push_str(&serde_json::to_string(&cons.name).unwrap_or_default());
-            for (i, (arg_name, _)) in cons.args.iter().enumerate() {
-                template.push_str(", ");
-                template.push_str(&serde_json::to_string(arg_name).unwrap_or_default());
-                template.push_str(": $");
-                template.push_str(&i.to_string());
-            }
-            template.push('}');
-            let template_idx = push_leaf(out, "json", Value::from(template));
-            let mut body_children = vec![template_idx];
-            body_children.extend(arg_vars.iter().copied());
-            let body_idx = push_node(out, "json", body_children);
-            let param_names: Vec<&str> = cons.args.iter().map(|(n, _)| n.as_str()).collect();
-            push_function(out, &param_names, body_idx)
+            let arg_refs: Vec<&str> = cons.args.iter().map(|(n, _)| n.as_str()).collect();
+            push_function(out, &arg_refs, obj)
         };
-        let cons_assign = push_node(out, "assign", vec![cons_target, cons_value]);
-        stmts.push(cons_assign);
+        let cons_target = push_leaf(out, "var", Value::from(cons.name.clone()));
+        stmts.push(push_node(out, "assign", vec![cons_target, cons_value]));
     }
 
     // 3. Recursor (ADR-0120 Phase 1 — `Term::Loop` feedback, no
@@ -1172,6 +1320,12 @@ fn desugar_data(lang: &Language, original: &AstNode, ast: &Ast, out: &mut Ast) -
 // ---------------------------------------------------------------------------
 
 /// Which fold machine to generate.
+///
+/// `Predicate` is retained for now-unused machinery: ADR-0152 replaced
+/// the type-as-predicate arrow with the nominal former, so only the
+/// `Recursor` machine is emitted — the enum stays because the codegen
+/// below is shared.
+#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum FoldMode {
     /// `Type` predicate: fold results are booleans ANDed per constructor.
@@ -1541,9 +1695,11 @@ fn build_fold_chain(
     for i in (0..constructors.len()).rev() {
         let wh_var = push_var_node(out, "__wh");
         let wh_v = push_fa(out, wh_var, "v");
-        let tag = push_fa(out, wh_v, "tag");
-        let name_lit = push_lit_node(out, Value::from(constructors[i].name.clone()));
-        let cond = push_eq_node(out, tag, name_lit);
+        // ADR-0152 §2: dispatch is constructor *identity* — the seeded
+        // `__ctor__` sym — never a `{"tag"}` string.
+        let ctor_field = push_fa(out, wh_v, "__ctor__");
+        let ctor_lit = push_sym_lit(out, &ctor_seed(type_name, &constructors[i].name));
+        let cond = push_eq_node(out, ctor_field, ctor_lit);
         let then_branch = build_fold_ctor_branch(out, mode, type_name, params, constructors, i);
         else_branch = push_if_node(out, cond, then_branch, else_branch);
     }
@@ -2742,7 +2898,11 @@ mod tests {
     }
 
     #[test]
-    fn data_nat_predicate_is_function() {
+    fn data_nat_former_is_canonical_object() {
+        // ADR-0152: `Nat` binds a nominal former — for a parameter-free
+        // family the former is the canonical `{"__former__": sym,
+        // "indices": []}` object itself (parameterized families bind an
+        // arrow returning that object).
         let mut lang = Language::new();
         lang.ast
             .merge(AstShapeDef::new("ast.data", "data"))
@@ -2758,7 +2918,7 @@ mod tests {
         assert_eq!(root.kind, "block");
         let children = root.payload.get("children").unwrap().as_array().unwrap();
 
-        // First statement: Nat = (v) -> ...  (assign with var target, function value)
+        // First statement: Nat = {"__former__": natSym, "indices": []}
         let pred_assign = out
             .get(AstRef::new(children[0].as_u64().unwrap() as usize))
             .unwrap();
@@ -2775,11 +2935,16 @@ mod tests {
             .unwrap();
         assert_eq!(target.kind, "var");
         assert_eq!(target.payload, json!("Nat"));
-        // Value: function
+        // Value: an `object` node whose first entry is `__former__`.
         let value = out
             .get(AstRef::new(pred_children[1].as_u64().unwrap() as usize))
             .unwrap();
-        assert_eq!(value.kind, "function");
+        assert_eq!(value.kind, "object");
+        let entry_idx = value.payload["children"][0].as_u64().unwrap() as usize;
+        let entry = out.get(AstRef::new(entry_idx)).unwrap();
+        let key_idx = entry.payload["children"][0].as_u64().unwrap() as usize;
+        let key = out.get(AstRef::new(key_idx)).unwrap();
+        assert_eq!(key.payload, json!("__former__"));
     }
 
     #[test]
@@ -2963,7 +3128,7 @@ mod tests {
         assert_eq!(root.kind, "block");
         let children = root.payload.get("children").unwrap().as_array().unwrap();
 
-        // Statement 2: Succ = (pred) -> json{...}
+        // Statement 2: Succ = (pred) -> {"__ctor__": succSym, "pred": pred, "type": …}
         let succ_assign = out
             .get(AstRef::new(children[2].as_u64().unwrap() as usize))
             .unwrap();
@@ -2983,36 +3148,67 @@ mod tests {
         let params = succ_fn.payload.get("params").unwrap().as_array().unwrap();
         assert_eq!(params.len(), 1);
         assert_eq!(params[0], json!("pred"));
-        // body: json node with children [template, pred_var]
+        // body: object node — entries __ctor__ / pred / type (ADR-0152).
         let body_idx = succ_fn.payload.get("body").unwrap().as_u64().unwrap() as usize;
         let body = out.get(AstRef::new(body_idx)).unwrap();
-        assert_eq!(body.kind, "json");
+        assert_eq!(body.kind, "object");
         let body_children = body.payload.get("children").unwrap().as_array().unwrap();
-        // Child 0: template json node (string payload)
-        let template = out
+        assert_eq!(body_children.len(), 3);
+        // Entry 0: "__ctor__" key + a `lit` carrying the serialized sym.
+        let entry0 = out
             .get(AstRef::new(body_children[0].as_u64().unwrap() as usize))
             .unwrap();
-        assert_eq!(template.kind, "json");
-        let template_str = template
-            .payload
-            .as_str()
-            .expect("template must be a string");
+        let key0 = out
+            .get(AstRef::new(
+                entry0.payload["children"][0].as_u64().unwrap() as usize,
+            ))
+            .unwrap();
+        assert_eq!(key0.payload, json!("__ctor__"));
+        let sym_lit = out
+            .get(AstRef::new(
+                entry0.payload["children"][1].as_u64().unwrap() as usize,
+            ))
+            .unwrap();
+        assert_eq!(sym_lit.kind, "lit");
         assert!(
-            template_str.contains("\"pred\""),
-            "template must contain pred field: {}",
-            template_str
+            sym_lit.payload.get("__sym__").is_some(),
+            "ctor identity must be a sym, got {}",
+            sym_lit.payload
         );
-        assert!(
-            template_str.contains("$0"),
-            "template must contain $0 placeholder: {}",
-            template_str
-        );
-        // Child 1: the arg var node (pred), NOT a string literal
-        let arg_node = out
+        // Entry 1: the arg field — key "pred", value the var node
+        // (pred), NOT a string literal.
+        let entry1 = out
             .get(AstRef::new(body_children[1].as_u64().unwrap() as usize))
+            .unwrap();
+        let key1 = out
+            .get(AstRef::new(
+                entry1.payload["children"][0].as_u64().unwrap() as usize,
+            ))
+            .unwrap();
+        assert_eq!(key1.payload, json!("pred"));
+        let arg_node = out
+            .get(AstRef::new(
+                entry1.payload["children"][1].as_u64().unwrap() as usize,
+            ))
             .unwrap();
         assert_eq!(arg_node.kind, "var", "arg must be a var node, not a lit");
         assert_eq!(arg_node.payload, json!("pred"));
+        // Entry 2: the "type" link — `{"__former__": fSym, "indices": …}`.
+        let entry2 = out
+            .get(AstRef::new(body_children[2].as_u64().unwrap() as usize))
+            .unwrap();
+        let key2 = out
+            .get(AstRef::new(
+                entry2.payload["children"][0].as_u64().unwrap() as usize,
+            ))
+            .unwrap();
+        assert_eq!(key2.payload, json!("type"));
+        let type_link = out
+            .get(AstRef::new(
+                entry2.payload["children"][1].as_u64().unwrap() as usize,
+            ))
+            .unwrap();
+        assert_eq!(type_link.kind, "object");
     }
 
     // -----------------------------------------------------------------------
