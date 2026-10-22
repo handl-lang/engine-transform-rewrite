@@ -2177,6 +2177,42 @@ fn desugar_match_to_recursor(
 ///
 /// Declines (`None`) when the target is not a `dimension` node or a
 /// dimension argument is not a `var` — those pass through unchanged.
+/// `type.Name` / `type.Name(p, …)` as an `assign` target — the alias
+/// head. Returns the remapped arena index of the `Name` `var` node plus
+/// the parameter names (`[]` for the plain form). `None` for any other
+/// target shape.
+fn type_alias_assign_parts(
+    ast: &Ast,
+    target: &AstNode,
+    remap: &[Option<usize>],
+) -> Option<(usize, Vec<String>)> {
+    let kids = target.payload.get("children")?.as_array()?;
+    let (fa, params) = match target.kind.as_str() {
+        "field-access" => (target, Vec::new()),
+        "call" => {
+            let fa = ast.get(AstRef::new(kids.first()?.as_u64()? as usize))?;
+            if fa.kind != "field-access" {
+                return None;
+            }
+            let mut params = Vec::new();
+            for arg in kids.iter().skip(1) {
+                let n = ast.get(AstRef::new(arg.as_u64()? as usize))?;
+                params.push(n.payload.as_str()?.to_string());
+            }
+            (fa, params)
+        }
+        _ => return None,
+    };
+    let fa_kids = fa.payload.get("children")?.as_array()?;
+    let subj = ast.get(AstRef::new(fa_kids.first()?.as_u64()? as usize))?;
+    if subj.kind != "var" || subj.payload.as_str() != Some("type") {
+        return None;
+    }
+    let name_old_idx = fa_kids.get(1)?.as_u64()? as usize;
+    let name_idx = remap.get(name_old_idx).copied().flatten()?;
+    Some((name_idx, params))
+}
+
 fn desugar_generic_assign(
     _lang: &Language,
     original: &AstNode,
@@ -2192,6 +2228,20 @@ fn desugar_generic_assign(
         .first()?
         .as_u64()? as usize;
     let old_target = ast.get(AstRef::new(old_target_idx))?;
+    // `type.Name := body` / `type.Name(p, …) := body` — the transparent
+    // type-alias form (ADR-0154 §3: aliases stay structural — plain
+    // substitution, no sym mint). `type` is a keyword, so `type.`
+    // field-access/call heads never name a real object: they declare an
+    // alias and desugar to a plain `assign` — `Name := body`, or
+    // `Name := (p…) ~> body` for the parameterized form.
+    if let Some((name_idx, params)) = type_alias_assign_parts(ast, old_target, remap) {
+        let mut body = value_idx;
+        if !params.is_empty() {
+            let pnames: Vec<&str> = params.iter().map(String::as_str).collect();
+            body = push_function(out, &pnames, body);
+        }
+        return Some(AstRef::new(push_node(out, "assign", vec![name_idx, body])));
+    }
     if old_target.kind != "dimension" {
         return None;
     }
