@@ -1696,20 +1696,12 @@ fn build_fold_chain(
         let wh_var = push_var_node(out, "__wh");
         let wh_v = push_fa(out, wh_var, "v");
         // ADR-0152 §2: dispatch is constructor *identity* — the seeded
-        // `__ctor__` sym — never a `{"tag"}` string.
+        // `__ctor__` sym — never a `{"tag"}` string. (The legacy `{tag}`
+        // bridge disjunct was deleted with the `__tag__`/`{tag}` bridge,
+        // ADR-0152 §Migration.)
         let ctor_field = push_fa(out, wh_v, "__ctor__");
         let ctor_lit = push_sym_lit(out, &ctor_seed(type_name, &constructors[i].name));
-        let id_eq = push_eq_node(out, ctor_field, ctor_lit);
-        // Legacy `{tag}` bridge: values minted by the pre-0152 encoding
-        // still dispatch on their string tag (covers `data` values in
-        // serialized artifacts; deleted with the `__tag__`/`{tag}`
-        // bridge, ADR-0152 §Migration).
-        let wh_var2 = push_var_node(out, "__wh");
-        let wh_v2 = push_fa(out, wh_var2, "v");
-        let tag_field = push_fa(out, wh_v2, "tag");
-        let tag_lit = push_lit_node(out, Value::from(constructors[i].name.as_str()));
-        let tag_eq = push_eq_node(out, tag_field, tag_lit);
-        let cond = push_node(out, "binary.or", vec![id_eq, tag_eq]);
+        let cond = push_eq_node(out, ctor_field, ctor_lit);
         let then_branch = build_fold_ctor_branch(out, mode, type_name, params, constructors, i);
         else_branch = push_if_node(out, cond, then_branch, else_branch);
     }
