@@ -1289,7 +1289,16 @@ fn desugar_data(lang: &Language, original: &AstNode, ast: &Ast, out: &mut Ast) -
     let rec_assign = push_node(out, "assign", vec![rec_target, rec_region]);
     stmts.push(rec_assign);
 
-    let block = push_node(out, "block", stmts);
+    // The emitted block is a *declaration group*, not a scope: its
+    // assigns (former, ctors, recursor) must bind in the enclosing
+    // statement list — a nested `block` child would scope them away and
+    // `Succ(Zero)` in a following statement would be unbound. The
+    // `__splice__` flag tells the desugar pass to splice this node's
+    // children into the parent's statement list (desugar_pass).
+    let payload = serde_json::json!({ "children": stmts, "__splice__": true });
+    let block = out
+        .push(AstNode::new("block").with_payload(payload))
+        .index();
     Some(AstRef::new(block))
 }
 
