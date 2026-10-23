@@ -132,6 +132,31 @@ pub(crate) fn build_rewrite(
             Value::Object(kept)
         }
     };
+    // Named arena references preserved from the original payload
+    // (`ARENA_REF_PAYLOAD_KEYS` — a `function` node's `body`) are old-arena
+    // indices: resolve them into output coordinates like the children, or
+    // they go stale the moment the rewrite changed the arena layout. A
+    // `patch`-provided key is rule-authored data and stays verbatim.
+    let patch_keys: std::collections::HashSet<&str> = match patch {
+        Some(Value::Object(obj)) => obj.keys().map(String::as_str).collect(),
+        Some(_) => handl_language::ast::ARENA_REF_PAYLOAD_KEYS
+            .iter()
+            .copied()
+            .collect(),
+        None => Default::default(),
+    };
+    for key in handl_language::ast::ARENA_REF_PAYLOAD_KEYS {
+        if patch_keys.contains(key) {
+            continue;
+        }
+        if let Some(old_idx) = payload.get(*key).and_then(|v| v.as_u64()) {
+            if let Some(new_idx) = resolver.resolve(out, old_idx as usize)? {
+                if let Some(obj) = payload.as_object_mut() {
+                    obj.insert((*key).to_string(), Value::from(new_idx));
+                }
+            }
+        }
+    }
     if !children.is_empty() {
         match &mut payload {
             Value::Object(obj) => {

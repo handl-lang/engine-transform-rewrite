@@ -48,6 +48,13 @@ pub(crate) type NativeFallback = HashMap<(String, String), String>;
 ///
 /// Verbatim from the legacy `desugar_pass`: every pass-through node is a
 /// clone of the input node with its children rewritten through `remap`.
+/// Named arena references in the payload — the audited
+/// [`ARENA_REF_PAYLOAD_KEYS`](handl_language::ast::ARENA_REF_PAYLOAD_KEYS)
+/// entries such as a `function` node's `body` — are rewritten the same way:
+/// they are old-arena indices too, and go stale the moment a rewrite
+/// changes the output arena's layout (a stale ref can even form a cycle,
+/// which `Ast::subtree` then never escapes). An unmapped target is left
+/// untouched, matching the `children` policy.
 fn remap_children(node: &AstNode, remap: &[Option<usize>]) -> AstNode {
     let mut new_payload = node.payload.clone();
     if let Some(children) = new_payload
@@ -58,6 +65,15 @@ fn remap_children(node: &AstNode, remap: &[Option<usize>]) -> AstNode {
             if let Some(old_idx) = child.as_u64() {
                 if let Some(Some(new_idx)) = remap.get(old_idx as usize) {
                     *child = serde_json::Value::from(*new_idx);
+                }
+            }
+        }
+    }
+    for key in handl_language::ast::ARENA_REF_PAYLOAD_KEYS {
+        if let Some(old_idx) = new_payload.get(*key).and_then(|v| v.as_u64()) {
+            if let Some(Some(new_idx)) = remap.get(old_idx as usize) {
+                if let Some(obj) = new_payload.as_object_mut() {
+                    obj.insert((*key).to_string(), serde_json::Value::from(*new_idx));
                 }
             }
         }
@@ -267,6 +283,13 @@ impl<'a> PassRun<'a> {
     }
 
     /// Visit every child of `node` (input-arena indices), filling `remap`.
+    ///
+    /// Named arena references (`ARENA_REF_PAYLOAD_KEYS` — a `function`'s
+    /// `body`) are visited too: they are part of the node's reachable set
+    /// the same way `children` are, and resolving them here lets the
+    /// pass-through remap in [`remap_children`] — and any `RewriteCtx` a
+    /// native consults — translate them into output indices instead of
+    /// leaving stale input coordinates.
     fn visit_children(&mut self, node: &AstNode, out: &mut Ast) -> Result<(), LangError> {
         let indices: Vec<usize> = node
             .payload
@@ -280,6 +303,11 @@ impl<'a> PassRun<'a> {
             .unwrap_or_default();
         for old_idx in indices {
             self.visit(old_idx, out)?;
+        }
+        for key in handl_language::ast::ARENA_REF_PAYLOAD_KEYS {
+            if let Some(old_idx) = node.payload.get(*key).and_then(|v| v.as_u64()) {
+                self.visit(old_idx as usize, out)?;
+            }
         }
         Ok(())
     }
