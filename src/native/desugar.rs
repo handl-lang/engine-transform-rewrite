@@ -317,13 +317,16 @@ fn parse_data_payload(
 /// - `var("Name")` -> ("Name", [])
 /// - `call(var("Name"), type-annot(n, Nat), type-annot(a, Type), ...)`
 ///      -> ("Name", [("n","Nat"), ("a","Type"), ...])
+/// - `dimension(var("Name"), …)` / `index_app(var("Name"), …)` — the `<>` /
+///      retired `{}` index-parameter spellings share the same
+///      `[head, args…]` layout.
 fn parse_type_expr(lang: &Language, node: &AstNode, ast: &Ast) -> Option<(String, Vec<DataParam>)> {
     match node.kind.as_str() {
         "var" => {
             let name = node.payload.as_str()?.to_string();
             Some((name, Vec::new()))
         }
-        "call" => {
+        "call" | "index_app" | "dimension" => {
             let children = node.payload.get("children").and_then(|c| c.as_array())?;
             let callee_idx = children.first()?.as_u64()? as usize;
             let callee = ast.get(AstRef::new(callee_idx))?;
