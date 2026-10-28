@@ -23,7 +23,7 @@
 
 #![warn(missing_docs)]
 
-/// [`handl_language::TransformCondition`](handl_language::TransformCondition)
+/// `handl_language::TransformCondition`
 /// evaluation now lives in the contract crate (`hnl_engine_transform::condition`)
 /// so consumers such as `hnl-engine-lint` need no dependency on this backend.
 /// Re-exported here for compatibility.
