@@ -4,7 +4,7 @@
 //! rule-interpreting rewriting engine that generalizes the legacy
 //! `handl-runtime::desugar_pass` machinery.
 //!
-//! - [`RewriteEngine::run_pass`] walks a pass's [`TransformDef`]s
+//! - [`RewriteEngine::run_pass`] walks a pass's [`handl_language::TransformDef`]s
 //!   bottom-up over the `Ast` arena with a `remap` old→new index table —
 //!   the proven `apply_desugar` algorithm, generalized to any named pass.
 //! - Dispatch is data-driven: a `kind → Vec<TransformDef>` table built once
@@ -18,12 +18,12 @@
 //!   forms (`while`, `do-while`, `for`, `nullish`, `opt-chain`) are
 //!   declarative `TransformDef`s in `data/transforms.yaml`.
 //! - Every run returns a [`TransformOutput`] with a [`RewriteTrace`]
-//!   (input→output provenance) and [`PassStats`] (visited/rewritten/
+//!   (input→output provenance) and `PassStats` (visited/rewritten/
 //!   per-rule counts + duration).
 
 #![warn(missing_docs)]
 
-/// [`TransformCondition`](handl_language::TransformCondition) evaluation —
+/// [`handl_language::TransformCondition`](handl_language::TransformCondition) evaluation —
 /// shared by this engine and by other consumers of the predicate vocabulary
 /// (e.g. `hnl-engine-lint` `Match` lint rules, ADR-0097).
 pub mod condition;
@@ -52,8 +52,7 @@ use crate::walk::PassRun;
 /// Bumped once per built-in pass so natives can keep per-pass caches
 /// (e.g. the desugar constructor index) keyed by an epoch that never
 /// repeats while an input arena is alive.
-pub static PASS_EPOCH: std::sync::atomic::AtomicU64 =
-    std::sync::atomic::AtomicU64::new(0);
+pub static PASS_EPOCH: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 /// The current pass epoch (see [`PASS_EPOCH`]).
 pub fn pass_epoch() -> u64 {
@@ -153,11 +152,9 @@ impl RewriteEngine {
         let base: Arc<dyn NativeRewrite> = Arc::new(native::desugar_native_registry());
         let natives: Arc<dyn NativeRewrite> =
             match hnl_engine_transform::native::transform_overlay() {
-                Some(overlay) => Arc::new(
-                    hnl_engine_transform::native::ChainedRewrite::new(vec![
-                        overlay, base,
-                    ]),
-                ),
+                Some(overlay) => Arc::new(hnl_engine_transform::native::ChainedRewrite::new(vec![
+                    overlay, base,
+                ])),
                 None => base,
             };
         let mut engine = self.with_native_registry(natives);
@@ -483,12 +480,13 @@ impl RewriteEngine {
     /// `child_remap` must map the old child indices referenced by `root`
     /// (in `ast`) to the new indices already present in `out`. The new root
     /// node — and any nodes created by the root rule — are appended to `out`.
-    /// `fresh_base` seeds the pass's [`RewriteStep::Fresh`] counter so a
+    /// `fresh_base` seeds the pass's `RewriteStep::Fresh` counter so a
     /// root-level rewrite mints `__fresh_*` names after every name the
     /// already-rewritten children minted (matching sequential numbering).
     ///
     /// This is the sequential tail used by the parallel engine: children are
     /// rewritten in parallel, then the root is processed once.
+    #[allow(clippy::too_many_arguments)] // whole pass context in one call
     pub fn run_pass_root(
         &self,
         lang: &Language,
@@ -593,12 +591,12 @@ fn reachable_from(ast: &Ast, root: AstRef) -> Vec<usize> {
         if !seen.insert(idx) {
             continue;
         }
-        if let Some(node) = ast.get(AstRef::new(idx)) {
-            if let Some(children) = node.payload.get("children").and_then(|c| c.as_array()) {
-                for v in children {
-                    if let Some(c) = v.as_u64() {
-                        stack.push(c as usize);
-                    }
+        if let Some(node) = ast.get(AstRef::new(idx))
+            && let Some(children) = node.payload.get("children").and_then(|c| c.as_array())
+        {
+            for v in children {
+                if let Some(c) = v.as_u64() {
+                    stack.push(c as usize);
                 }
             }
         }

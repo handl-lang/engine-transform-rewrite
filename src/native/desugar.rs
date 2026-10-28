@@ -11,6 +11,8 @@
 //! [`TransformDef`](handl_language::TransformDef) exists for the kind —
 //! mirroring the legacy `try_rust_desugar` fallback that ran after the
 //! declarative `AstShapeDef::desugar` dispatch.
+/// A registered native rewrite handler (see [`NativeRewriteRegistry`]).
+type NativeRewriteFn = Box<dyn Fn(&mut RewriteCtx<'_>) -> Result<AstRef, LangError> + Send + Sync>;
 
 use handl_language::{Ast, AstNode, AstRef, LangError, Language};
 use hnl_engine_transform::native::{NativeRewriteRegistry, RewriteCtx};
@@ -39,6 +41,10 @@ use std::sync::OnceLock;
 // either. They live as `TransformDef`s in `data/transforms.yaml`.
 // ---------------------------------------------------------------------------
 
+/// Constructor -> `data` declaration index for one pass: constructor name to
+/// `(type name, type params, constructors of the owning data decl)`.
+type DataIndex = HashMap<String, (String, Vec<DataParam>, Vec<DataConstructor>)>;
+
 thread_local! {
     /// Constructor -> `data` declaration index for the current pass.
     ///
@@ -48,22 +54,12 @@ thread_local! {
     /// the scan runs once per pass. The key is the pass epoch plus the input
     /// arena identity (pointer + length); the epoch advances on every pass,
     /// so an entry cannot outlive the arena it was built from.
-    static DATA_INDEX: std::cell::RefCell<
-        Option<(
-            u64,
-            usize,
-            usize,
-            HashMap<String, (String, Vec<DataParam>, Vec<DataConstructor>)>,
-        )>,
-    > = const { std::cell::RefCell::new(None) };
+    static DATA_INDEX: std::cell::RefCell<Option<(u64, usize, usize, DataIndex)>> =
+        const { std::cell::RefCell::new(None) };
 }
 
 /// Run `f` with the constructor index of `ast` for the current pass.
-fn with_data_index<R>(
-    lang: &Language,
-    ast: &Ast,
-    f: impl FnOnce(&HashMap<String, (String, Vec<DataParam>, Vec<DataConstructor>)>) -> R,
-) -> R {
+fn with_data_index<R>(lang: &Language, ast: &Ast, f: impl FnOnce(&DataIndex) -> R) -> R {
     let key = (crate::pass_epoch(), ast as *const Ast as usize, ast.len());
     DATA_INDEX.with(|cell| {
         let mut slot = cell.borrow_mut();
@@ -75,16 +71,15 @@ fn with_data_index<R>(
             let mut index: HashMap<String, (String, Vec<DataParam>, Vec<DataConstructor>)> =
                 HashMap::new();
             for node in ast.nodes() {
-                if node.kind == "data" {
-                    if let Some((type_name, params, constructors)) =
+                if node.kind == "data"
+                    && let Some((type_name, params, constructors)) =
                         parse_data_payload(lang, node, ast)
-                    {
-                        for cons in &constructors {
-                            index.insert(
-                                cons.name.clone(),
-                                (type_name.clone(), params.clone(), constructors.clone()),
-                            );
-                        }
+                {
+                    for cons in &constructors {
+                        index.insert(
+                            cons.name.clone(),
+                            (type_name.clone(), params.clone(), constructors.clone()),
+                        );
                     }
                 }
             }
@@ -316,10 +311,10 @@ fn parse_data_payload(
 ///
 /// - `var("Name")` -> ("Name", [])
 /// - `call(var("Name"), type-annot(n, Nat), type-annot(a, Type), ...)`
-///      -> ("Name", [("n","Nat"), ("a","Type"), ...])
+///   -> ("Name", [("n","Nat"), ("a","Type"), ...])
 /// - `dimension(var("Name"), …)` / `index_app(var("Name"), …)` — the `<>` /
-///      retired `{}` index-parameter spellings share the same
-///      `[head, args…]` layout.
+///   retired `{}` index-parameter spellings share the same
+///   `[head, args…]` layout.
 fn parse_type_expr(lang: &Language, node: &AstNode, ast: &Ast) -> Option<(String, Vec<DataParam>)> {
     match node.kind.as_str() {
         "var" => {
@@ -378,11 +373,10 @@ fn parse_type_param(lang: &Language, node: &AstNode, ast: &Ast) -> Option<(Strin
         let type_node = ast.get(AstRef::new(type_idx))?;
         let typ = node_to_type_string(lang, ast, type_node);
         Some((name, typ))
-    } else if let Some(name) = node.payload.as_str() {
-        // bare `var`
-        Some((name.to_string(), "_".to_string()))
     } else {
-        None
+        node.payload
+            .as_str()
+            .map(|name| (name.to_string(), "_".to_string()))
     }
 }
 
@@ -404,45 +398,38 @@ fn collect_constructors(
             let children = node.payload.get("children").and_then(|c| c.as_array());
             if let Some(arr) = children {
                 for child_val in arr {
-                    if let Some(idx) = child_val.as_u64() {
-                        if let Some(child) = ast.get(AstRef::new(idx as usize)) {
-                            collect_constructors(lang, child, ast, out, params);
-                        }
+                    if let Some(idx) = child_val.as_u64()
+                        && let Some(child) = ast.get(AstRef::new(idx as usize))
+                    {
+                        collect_constructors(lang, child, ast, out, params);
                     }
                 }
             }
         }
         "type-annot" => {
             let children = node.payload.get("children").and_then(|c| c.as_array());
-            if let Some(ta_arr) = children {
-                if ta_arr.len() >= 2 {
-                    // Roles first, positional fallback (ADR-0081).
-                    let cons_role = lang.child_role_index(&node.kind, "subject").ok().flatten();
-                    let result_role = lang.child_role_index(&node.kind, "annot").ok().flatten();
-                    let cons_idx = ta_arr
-                        .get(cons_role.unwrap_or(0))
-                        .and_then(|v| v.as_u64())
-                        .map(|v| v as usize);
-                    let result_idx = ta_arr
-                        .get(result_role.unwrap_or(1))
-                        .and_then(|v| v.as_u64())
-                        .map(|v| v as usize);
-                    let result_indices = result_idx
-                        .and_then(|idx| ast.get(AstRef::new(idx)))
-                        .map(|n| extract_result_indices_from_type(lang, n, ast, params.len()))
-                        .unwrap_or_else(|| vec![None; params.len()]);
-                    if let Some(cons_idx) = cons_idx {
-                        if let Some(cons_node) = ast.get(AstRef::new(cons_idx)) {
-                            collect_constructor_leaf(
-                                lang,
-                                cons_node,
-                                ast,
-                                out,
-                                params,
-                                result_indices,
-                            );
-                        }
-                    }
+            if let Some(ta_arr) = children
+                && ta_arr.len() >= 2
+            {
+                // Roles first, positional fallback (ADR-0081).
+                let cons_role = lang.child_role_index(&node.kind, "subject").ok().flatten();
+                let result_role = lang.child_role_index(&node.kind, "annot").ok().flatten();
+                let cons_idx = ta_arr
+                    .get(cons_role.unwrap_or(0))
+                    .and_then(|v| v.as_u64())
+                    .map(|v| v as usize);
+                let result_idx = ta_arr
+                    .get(result_role.unwrap_or(1))
+                    .and_then(|v| v.as_u64())
+                    .map(|v| v as usize);
+                let result_indices = result_idx
+                    .and_then(|idx| ast.get(AstRef::new(idx)))
+                    .map(|n| extract_result_indices_from_type(lang, n, ast, params.len()))
+                    .unwrap_or_else(|| vec![None; params.len()]);
+                if let Some(cons_idx) = cons_idx
+                    && let Some(cons_node) = ast.get(AstRef::new(cons_idx))
+                {
+                    collect_constructor_leaf(lang, cons_node, ast, out, params, result_indices);
                 }
             }
         }
@@ -463,30 +450,27 @@ fn extract_result_indices_from_type(
     ast: &Ast,
     expected: usize,
 ) -> Vec<Option<String>> {
-    match node.kind.as_str() {
-        "call" => {
-            let children = node.payload.get("children").and_then(|c| c.as_array());
-            if let Some(arr) = children {
-                let mut out: Vec<Option<String>> = arr
-                    .iter()
-                    .skip(1)
-                    .map(|v| {
-                        v.as_u64()
-                            .and_then(|idx| ast.get(AstRef::new(idx as usize)))
-                            .map(|n| node_to_type_string(lang, ast, n))
-                            .filter(|s| !s.is_empty())
-                            .map(Some)
-                            .unwrap_or(None)
-                    })
-                    .collect();
-                while out.len() < expected {
-                    out.push(None);
-                }
-                out.truncate(expected);
-                return out;
+    if node.kind.as_str() == "call" {
+        let children = node.payload.get("children").and_then(|c| c.as_array());
+        if let Some(arr) = children {
+            let mut out: Vec<Option<String>> = arr
+                .iter()
+                .skip(1)
+                .map(|v| {
+                    v.as_u64()
+                        .and_then(|idx| ast.get(AstRef::new(idx as usize)))
+                        .map(|n| node_to_type_string(lang, ast, n))
+                        .filter(|s| !s.is_empty())
+                        .map(Some)
+                        .unwrap_or(None)
+                })
+                .collect();
+            while out.len() < expected {
+                out.push(None);
             }
+            out.truncate(expected);
+            return out;
         }
-        _ => {}
     }
     vec![None; expected]
 }
@@ -506,10 +490,10 @@ fn collect_constructor_leaf(
             let cname = node.payload.as_str().unwrap_or("").to_string();
             // Bootstrap: nullary constructors with no explicit result type get
             // `0` for the first `Nat` parameter (the canonical base index).
-            if result_indices.iter().all(|r| r.is_none()) {
-                if let Some(i) = params.iter().position(|p| p.typ == "Nat") {
-                    result_indices[i] = Some("0".to_string());
-                }
+            if result_indices.iter().all(|r| r.is_none())
+                && let Some(i) = params.iter().position(|p| p.typ == "Nat")
+            {
+                result_indices[i] = Some("0".to_string());
             }
             out.push(DataConstructor {
                 name: cname,
@@ -531,11 +515,11 @@ fn collect_constructor_leaf(
                 .to_string();
             let mut args = Vec::new();
             for (i, arg_val) in arr.iter().enumerate().skip(1) {
-                if let Some(arg_idx) = arg_val.as_u64() {
-                    if let Some(arg_node) = ast.get(AstRef::new(arg_idx as usize)) {
-                        let (arg_name, arg_type) = parse_constructor_arg(lang, ast, arg_node, i);
-                        args.push((arg_name, arg_type));
-                    }
+                if let Some(arg_idx) = arg_val.as_u64()
+                    && let Some(arg_node) = ast.get(AstRef::new(arg_idx as usize))
+                {
+                    let (arg_name, arg_type) = parse_constructor_arg(lang, ast, arg_node, i);
+                    args.push((arg_name, arg_type));
                 }
             }
             out.push(DataConstructor {
@@ -562,36 +546,36 @@ fn parse_constructor_arg(
         .is_some()
     {
         let ta_children = arg_node.payload.get("children").and_then(|c| c.as_array());
-        if let Some(ta_arr) = ta_children {
-            if ta_arr.len() >= 2 {
-                // Roles first, positional fallback (ADR-0081).
-                let subject_role = lang
-                    .child_role_index(&arg_node.kind, "subject")
-                    .ok()
-                    .flatten();
-                let annot_role = lang
-                    .child_role_index(&arg_node.kind, "annot")
-                    .ok()
-                    .flatten();
-                let subject_idx = ta_arr
-                    .get(subject_role.unwrap_or(0))
-                    .and_then(|v| v.as_u64())
-                    .map(|v| v as usize);
-                let annot_idx = ta_arr
-                    .get(annot_role.unwrap_or(1))
-                    .and_then(|v| v.as_u64())
-                    .map(|v| v as usize);
-                let name = subject_idx
-                    .and_then(|idx| ast.get(AstRef::new(idx)))
-                    .and_then(|n| n.payload.as_str())
-                    .unwrap_or("_")
-                    .to_string();
-                let typ = annot_idx
-                    .and_then(|idx| ast.get(AstRef::new(idx)))
-                    .map(|n| node_to_type_string(lang, ast, n))
-                    .unwrap_or_else(|| "_".to_string());
-                return (name, typ);
-            }
+        if let Some(ta_arr) = ta_children
+            && ta_arr.len() >= 2
+        {
+            // Roles first, positional fallback (ADR-0081).
+            let subject_role = lang
+                .child_role_index(&arg_node.kind, "subject")
+                .ok()
+                .flatten();
+            let annot_role = lang
+                .child_role_index(&arg_node.kind, "annot")
+                .ok()
+                .flatten();
+            let subject_idx = ta_arr
+                .get(subject_role.unwrap_or(0))
+                .and_then(|v| v.as_u64())
+                .map(|v| v as usize);
+            let annot_idx = ta_arr
+                .get(annot_role.unwrap_or(1))
+                .and_then(|v| v.as_u64())
+                .map(|v| v as usize);
+            let name = subject_idx
+                .and_then(|idx| ast.get(AstRef::new(idx)))
+                .and_then(|n| n.payload.as_str())
+                .unwrap_or("_")
+                .to_string();
+            let typ = annot_idx
+                .and_then(|idx| ast.get(AstRef::new(idx)))
+                .map(|n| node_to_type_string(lang, ast, n))
+                .unwrap_or_else(|| "_".to_string());
+            return (name, typ);
         }
     }
     let typ = node_to_type_string(lang, ast, arg_node);
@@ -607,7 +591,7 @@ fn parse_constructor_arg(
 /// identifier.
 fn derive_arg_name_from_type(type_str: &str) -> String {
     type_str
-        .split(|c: char| c == '(' || c == ' ' || c == '.' || c == '-' || c == '+')
+        .split(['(', ' ', '.', '-', '+'])
         .next()
         .unwrap_or("_")
         .to_lowercase()
@@ -672,22 +656,22 @@ fn node_to_type_string(lang: &Language, ast: &Ast, node: &AstNode) -> String {
             format!("{}({})", callee, args.join(", "))
         }
         "type-annot" => {
-            if let Some(arr) = kids(node) {
-                if arr.len() >= 2 {
-                    let left = child_str(lang, ast, node, "subject", 0);
-                    let right = child_str(lang, ast, node, "annot", 1);
-                    return format!("{} : {}", left, right);
-                }
+            if let Some(arr) = kids(node)
+                && arr.len() >= 2
+            {
+                let left = child_str(lang, ast, node, "subject", 0);
+                let right = child_str(lang, ast, node, "annot", 1);
+                return format!("{} : {}", left, right);
             }
             String::new()
         }
         "field-access" => {
-            if let Some(arr) = kids(node) {
-                if arr.len() >= 2 {
-                    let left = child_str(lang, ast, node, "target", 0);
-                    let right = child_str(lang, ast, node, "field", 1);
-                    return format!("{}.{}", left, right);
-                }
+            if let Some(arr) = kids(node)
+                && arr.len() >= 2
+            {
+                let left = child_str(lang, ast, node, "target", 0);
+                let right = child_str(lang, ast, node, "field", 1);
+                return format!("{}.{}", left, right);
             }
             String::new()
         }
@@ -746,14 +730,14 @@ fn check_strict_positivity(
     for cons in constructors {
         for (arg_name, arg_type) in &cons.args {
             let mut parser = TypeExprParser::new(arg_type);
-            if let Some(expr) = parser.parse() {
-                if let Err(reason) = check_strict_positivity_rec(&expr, type_name) {
-                    return Err(format!(
-                        "strict positivity violated: constructor '{}' arg '{}' has type '{}' \
+            if let Some(expr) = parser.parse()
+                && let Err(reason) = check_strict_positivity_rec(&expr, type_name)
+            {
+                return Err(format!(
+                    "strict positivity violated: constructor '{}' arg '{}' has type '{}' \
                          — {}",
-                        cons.name, arg_name, arg_type, reason
-                    ));
-                }
+                    cons.name, arg_name, arg_type, reason
+                ));
             }
         }
     }
@@ -1194,10 +1178,7 @@ fn desugar_data(lang: &Language, original: &AstNode, ast: &Ast, out: &mut Ast) -
     //    `F(i⃗)` produces the canonical `{"__former__": fSym, "indices": i⃗}`
     //    object — family equality is nominal head + structural indices
     //    (ADR-0152 §1), not a predicate-arrow membership test.
-    let index_vars: Vec<usize> = params
-        .iter()
-        .map(|p| push_var_node(out, &p.name))
-        .collect();
+    let index_vars: Vec<usize> = params.iter().map(|p| push_var_node(out, &p.name)).collect();
     let former_obj = push_family_app(out, &type_name, index_vars);
     let f_value = if params.is_empty() {
         former_obj
@@ -2269,7 +2250,7 @@ fn desugar_generic_assign(
 // Rust desugar dispatch (registry-based, ADR-0081 engine genericity)
 // ---------------------------------------------------------------------------
 
-/// Type of a Rust-level desugar handler registered in [`desugar_registry`].
+/// Type of a Rust-level desugar handler registered in `desugar_registry`.
 ///
 /// Each handler takes the `Language`, the original (pre-remap) node, the
 /// full original AST, the output arena, and the old→new remap table. It
@@ -2340,7 +2321,7 @@ fn desugar_registry() -> &'static HashMap<&'static str, DesugarFn> {
 /// matches via [`RewriteCtx::pass_through`]. The fixed-shape forms
 /// (`while`/`do-while`/`for`/`nullish`/`opt-chain`) are declarative
 /// `TransformDef`s in `data/transforms.yaml`; `if` stays surface-level
-/// (see [`desugar_registry`]).
+/// (see `desugar_registry`).
 /// The `handl:` spellings are the canonical names: a `.hnl`-authored
 /// overlay (`handl:desugar.data`, `handl:desugar.match_recursor` —
 /// `handl-packages/desugar/desugar.hnl` via the process-wide transform
@@ -2361,9 +2342,7 @@ pub static DESUGAR_NATIVES: &[(&str, &str)] = &[
 /// conditional match — becomes [`RewriteCtx::pass_through`]: the node is
 /// pushed into the output arena unchanged with its children remapped,
 /// exactly as the legacy fallthrough did.
-fn adapt(
-    f: DesugarFn,
-) -> Box<dyn Fn(&mut RewriteCtx<'_>) -> Result<AstRef, LangError> + Send + Sync> {
+fn adapt(f: DesugarFn) -> NativeRewriteFn {
     Box::new(move |ctx| {
         let lang = ctx.lang();
         let node = ctx.node();
@@ -2410,7 +2389,7 @@ mod tests {
     /// unchanged — every `apply_desugar` call below is a `"desugar"` pass run
     /// with the native desugar registry wired.
     fn apply_desugar(lang: &Language, ast: &Ast) -> Ast {
-        if ast.len() == 0 {
+        if ast.is_empty() {
             return Ast::new();
         }
         let engine = crate::RewriteEngine::new().with_desugar_natives();
@@ -3224,13 +3203,13 @@ mod tests {
             .unwrap();
         let key0 = out
             .get(AstRef::new(
-                entry0.payload["children"][0].as_u64().unwrap() as usize,
+                entry0.payload["children"][0].as_u64().unwrap() as usize
             ))
             .unwrap();
         assert_eq!(key0.payload, json!("__ctor__"));
         let sym_lit = out
             .get(AstRef::new(
-                entry0.payload["children"][1].as_u64().unwrap() as usize,
+                entry0.payload["children"][1].as_u64().unwrap() as usize
             ))
             .unwrap();
         assert_eq!(sym_lit.kind, "lit");
@@ -3246,13 +3225,13 @@ mod tests {
             .unwrap();
         let key1 = out
             .get(AstRef::new(
-                entry1.payload["children"][0].as_u64().unwrap() as usize,
+                entry1.payload["children"][0].as_u64().unwrap() as usize
             ))
             .unwrap();
         assert_eq!(key1.payload, json!("pred"));
         let arg_node = out
             .get(AstRef::new(
-                entry1.payload["children"][1].as_u64().unwrap() as usize,
+                entry1.payload["children"][1].as_u64().unwrap() as usize
             ))
             .unwrap();
         assert_eq!(arg_node.kind, "var", "arg must be a var node, not a lit");
@@ -3263,13 +3242,13 @@ mod tests {
             .unwrap();
         let key2 = out
             .get(AstRef::new(
-                entry2.payload["children"][0].as_u64().unwrap() as usize,
+                entry2.payload["children"][0].as_u64().unwrap() as usize
             ))
             .unwrap();
         assert_eq!(key2.payload, json!("type"));
         let type_link = out
             .get(AstRef::new(
-                entry2.payload["children"][1].as_u64().unwrap() as usize,
+                entry2.payload["children"][1].as_u64().unwrap() as usize
             ))
             .unwrap();
         assert_eq!(type_link.kind, "object");
@@ -3785,36 +3764,35 @@ mod tests {
             // constructor argument c1 (index 1 + ctor 1 in the flat
             // `__in` tuple).
             let callee_idx = kids[0].as_u64().map(|v| v as usize);
-            if let Some(ci) = callee_idx {
-                if let Some(callee) = out.get(AstRef::new(ci)) {
-                    if callee.kind == "field-access" {
-                        let fa_kids = callee
-                            .payload
-                            .get("children")
-                            .and_then(|c| c.as_array())
-                            .cloned()
-                            .unwrap_or_default();
-                        let target_ok = fa_kids
-                            .first()
-                            .and_then(|v| v.as_u64())
-                            .and_then(|i| out.get(AstRef::new(i as usize)))
-                            .is_some_and(|t| t.kind == "var" && t.payload == json!("__in"));
-                        let index_ok = fa_kids
-                            .get(1)
-                            .and_then(|v| v.as_u64())
-                            .and_then(|i| out.get(AstRef::new(i as usize)))
-                            .is_some_and(|f| f.payload == json!(2));
-                        if target_ok && index_ok {
-                            assert_eq!(
-                                kids.len(),
-                                5,
-                                "Node frame apply call should have 5 children (callee + 2 args + 2 rec results), got {}: payload={}",
-                                kids.len(),
-                                node.payload
-                            );
-                            found_node_step = true;
-                        }
-                    }
+            if let Some(ci) = callee_idx
+                && let Some(callee) = out.get(AstRef::new(ci))
+                && callee.kind == "field-access"
+            {
+                let fa_kids = callee
+                    .payload
+                    .get("children")
+                    .and_then(|c| c.as_array())
+                    .cloned()
+                    .unwrap_or_default();
+                let target_ok = fa_kids
+                    .first()
+                    .and_then(|v| v.as_u64())
+                    .and_then(|i| out.get(AstRef::new(i as usize)))
+                    .is_some_and(|t| t.kind == "var" && t.payload == json!("__in"));
+                let index_ok = fa_kids
+                    .get(1)
+                    .and_then(|v| v.as_u64())
+                    .and_then(|i| out.get(AstRef::new(i as usize)))
+                    .is_some_and(|f| f.payload == json!(2));
+                if target_ok && index_ok {
+                    assert_eq!(
+                        kids.len(),
+                        5,
+                        "Node frame apply call should have 5 children (callee + 2 args + 2 rec results), got {}: payload={}",
+                        kids.len(),
+                        node.payload
+                    );
+                    found_node_step = true;
                 }
             }
         }

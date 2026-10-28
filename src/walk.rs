@@ -62,20 +62,19 @@ fn remap_children(node: &AstNode, remap: &[Option<usize>]) -> AstNode {
         .and_then(|c| c.as_array_mut())
     {
         for child in children.iter_mut() {
-            if let Some(old_idx) = child.as_u64() {
-                if let Some(Some(new_idx)) = remap.get(old_idx as usize) {
-                    *child = serde_json::Value::from(*new_idx);
-                }
+            if let Some(old_idx) = child.as_u64()
+                && let Some(Some(new_idx)) = remap.get(old_idx as usize)
+            {
+                *child = serde_json::Value::from(*new_idx);
             }
         }
     }
     for key in handl_language::ast::ARENA_REF_PAYLOAD_KEYS {
-        if let Some(old_idx) = new_payload.get(*key).and_then(|v| v.as_u64()) {
-            if let Some(Some(new_idx)) = remap.get(old_idx as usize) {
-                if let Some(obj) = new_payload.as_object_mut() {
-                    obj.insert((*key).to_string(), serde_json::Value::from(*new_idx));
-                }
-            }
+        if let Some(old_idx) = new_payload.get(*key).and_then(|v| v.as_u64())
+            && let Some(Some(new_idx)) = remap.get(old_idx as usize)
+            && let Some(obj) = new_payload.as_object_mut()
+        {
+            obj.insert((*key).to_string(), serde_json::Value::from(*new_idx));
         }
     }
     AstNode {
@@ -110,11 +109,12 @@ pub(crate) struct PassRun<'a> {
     pub(crate) trace: RewriteTrace,
     /// Pass statistics.
     pub(crate) stats: PassStats,
-    /// Monotonic fresh-name counter for [`RewriteStep::Fresh`] (ADR-0094).
+    /// Monotonic fresh-name counter for `RewriteStep::Fresh` (ADR-0094).
     pub(crate) fresh_id: usize,
 }
 
 impl<'a> PassRun<'a> {
+    #[allow(clippy::too_many_arguments)] // internal walker; args are the whole context
     pub(crate) fn new(
         lang: &'a Language,
         ast: &'a Ast,

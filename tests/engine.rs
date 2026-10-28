@@ -253,7 +253,9 @@ fn rule_replace_navigates_a_deep_path() {
     assert_eq!(r.payload["children"][0].as_u64().unwrap(), 0);
     assert_eq!(
         out.ast
-            .get(AstRef::new(r.payload["children"][0].as_u64().unwrap() as usize))
+            .get(AstRef::new(
+                r.payload["children"][0].as_u64().unwrap() as usize
+            ))
             .unwrap()
             .payload,
         json!(3)
@@ -672,7 +674,7 @@ fn priority_ordering_first_match_wins() {
         .unwrap();
     assert_eq!(out.ast.at(out.root).unwrap().kind, "b"); // t.lo fired first
     assert_eq!(out.stats.per_rule.get("t.lo"), Some(&1));
-    assert!(out.stats.per_rule.get("t.hi").is_none());
+    assert!(!out.stats.per_rule.contains_key("t.hi"));
     // Trace records the rewrite.
     assert_eq!(out.trace.rewrites.len(), 1);
     assert_eq!(out.trace.rewrites[0].rule_id, "t.lo");
@@ -967,7 +969,7 @@ fn random_ast(rng: &mut Rng, n: usize) -> Ast {
                 let count = rng.pick(4) as usize;
                 let children: Vec<usize> = (0..count)
                     .map(|_| {
-                        if ast.len() == 0 {
+                        if ast.is_empty() {
                             0
                         } else {
                             rng.pick(ast.len() as u64) as usize

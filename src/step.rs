@@ -43,7 +43,7 @@ pub(crate) trait Resolver {
     ) -> Result<Option<usize>, LangError>;
 }
 
-/// Per-rule-application state for [`RewriteStep::Fresh`] (ADR-0094).
+/// Per-rule-application state for `RewriteStep::Fresh` (ADR-0094).
 ///
 /// `counter` is a per-pass counter passed in from the walker; `names`
 /// records which output-arena `var` node was minted for each hint in the
@@ -88,6 +88,10 @@ fn child_index(original: &AstNode, i: usize) -> Option<usize> {
 /// overwrite, absent keys are preserved, and the `children` key is managed
 /// by the rewrite itself (replaced by the built children, or removed when
 /// the rule produces none).
+// The rewrite builder threads resolver, language, target kind, steps, patch and
+// provenance through one call; they are all needed together and bundling them
+// would only add a struct nobody else uses.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn build_rewrite(
     resolver: &mut dyn Resolver,
     lang: &Language,
@@ -149,12 +153,11 @@ pub(crate) fn build_rewrite(
         if patch_keys.contains(key) {
             continue;
         }
-        if let Some(old_idx) = payload.get(*key).and_then(|v| v.as_u64()) {
-            if let Some(new_idx) = resolver.resolve(out, old_idx as usize)? {
-                if let Some(obj) = payload.as_object_mut() {
-                    obj.insert((*key).to_string(), Value::from(new_idx));
-                }
-            }
+        if let Some(old_idx) = payload.get(*key).and_then(|v| v.as_u64())
+            && let Some(new_idx) = resolver.resolve(out, old_idx as usize)?
+            && let Some(obj) = payload.as_object_mut()
+        {
+            obj.insert((*key).to_string(), Value::from(new_idx));
         }
     }
     if !children.is_empty() {
@@ -199,15 +202,13 @@ pub(crate) fn descendant_index(ast: &Ast, original: &AstNode, path: &[usize]) ->
             .and_then(|arr| arr.get(step))
             .and_then(|v| v.as_u64())
             .map(|v| v as usize);
-        match next_idx {
-            Some(idx) => {
-                current_idx = Some(idx);
-                match ast.get(AstRef::new(idx)) {
-                    Some(n) => current_node = n,
-                    None => return None,
-                }
+        {
+            let idx = next_idx?;
+            current_idx = Some(idx);
+            {
+                let n = ast.get(AstRef::new(idx))?;
+                current_node = n
             }
-            None => return None,
         }
     }
     current_idx
@@ -263,10 +264,10 @@ fn build_step(
                 Some(arr) => {
                     let mut out_children = Vec::new();
                     for v in arr.iter().skip(*start) {
-                        if let Some(old_idx) = v.as_u64().map(|i| i as usize) {
-                            if let Some(new_idx) = resolver.resolve(out, old_idx)? {
-                                out_children.push(Value::from(new_idx));
-                            }
+                        if let Some(old_idx) = v.as_u64().map(|i| i as usize)
+                            && let Some(new_idx) = resolver.resolve(out, old_idx)?
+                        {
+                            out_children.push(Value::from(new_idx));
                         }
                     }
                     Ok(out_children)
@@ -316,11 +317,11 @@ fn build_step(
             } else {
                 let mut p = Map::new();
                 p.insert("children".to_string(), Value::Array(child_indices));
-                if let Some(extra) = payload {
-                    if let Some(obj) = extra.as_object() {
-                        for (k, v) in obj {
-                            p.insert(k.clone(), v.clone());
-                        }
+                if let Some(extra) = payload
+                    && let Some(obj) = extra.as_object()
+                {
+                    for (k, v) in obj {
+                        p.insert(k.clone(), v.clone());
                     }
                 }
                 Value::Object(p)

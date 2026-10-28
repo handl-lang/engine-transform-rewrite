@@ -1,4 +1,4 @@
-//! [`TransformCondition`] evaluation (ADR-0094 §3).
+//! `TransformCondition` evaluation (ADR-0094 §3).
 //!
 //! Conditions are pure predicates over the *input* node (pre-remap) and the
 //! input arena. `KindAt` resolves the child position by named role via
