@@ -23,10 +23,11 @@
 
 #![warn(missing_docs)]
 
-/// [`handl_language::TransformCondition`](handl_language::TransformCondition) evaluation —
-/// shared by this engine and by other consumers of the predicate vocabulary
-/// (e.g. `hnl-engine-lint` `Match` lint rules, ADR-0097).
-pub mod condition;
+/// [`handl_language::TransformCondition`](handl_language::TransformCondition)
+/// evaluation now lives in the contract crate (`hnl_engine_transform::condition`)
+/// so consumers such as `hnl-engine-lint` need no dependency on this backend.
+/// Re-exported here for compatibility.
+pub use hnl_engine_transform::condition;
 mod dispatch;
 pub mod native;
 mod step;
