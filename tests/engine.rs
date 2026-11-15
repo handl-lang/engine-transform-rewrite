@@ -633,6 +633,201 @@ fn condition_mismatch_passes_through() {
     assert_eq!(out.stats.rewritten, 0);
 }
 
+// --- AttrEq / SameAttr (mlopt law-guard vocabulary) -------------------------
+
+/// An `a` node carrying `payload.attrs` — the mlopt bridge's encoding.
+fn attr_node(attrs: Value, children: &[usize]) -> AstNode {
+    AstNode::new("a").with_payload(json!({ "attrs": attrs, "children": children }))
+}
+
+/// A node of `kind` carrying `payload.attrs` (attr source that must not
+/// itself match the rule under test).
+fn attr_node_kind(kind: &str, attrs: Value, children: &[usize]) -> AstNode {
+    AstNode::new(kind).with_payload(json!({ "attrs": attrs, "children": children }))
+}
+
+#[test]
+fn condition_attr_eq_literal_and_presence() {
+    let mut lang = test_lang();
+    add_rule(
+        &mut lang,
+        rule_with_when(TransformCondition::AttrEq {
+            path: vec![],
+            attr: "chunks".into(),
+            value: Some(json!(1)),
+        }),
+    );
+    let mut ast = Ast::new();
+    ast.push(attr_node(json!({"chunks": 1, "dim": 0}), &[])); // 0 — fires
+    ast.push(attr_node(json!({"chunks": 2, "dim": 0}), &[])); // 1 — wrong value
+    ast.push(attr_node(json!({"dim": 0}), &[])); // 2 — attr absent
+    ast.push(node("a", &[])); // 3 — no attrs map at all
+    let out = RewriteEngine::new()
+        .run_pass(&lang, &ast, root(&ast), "p")
+        .unwrap();
+    assert_eq!(out.stats.rewritten, 1);
+    // The rewritten node is the arena root's counterpart — only node 0
+    // became `b`.
+    let kinds: Vec<_> = (0..out.ast.len())
+        .map(|i| out.ast.at(AstRef::new(i)).unwrap().kind.clone())
+        .collect();
+    assert_eq!(kinds.iter().filter(|k| *k == "b").count(), 1);
+}
+
+#[test]
+fn condition_attr_eq_child_path_and_presence_only() {
+    let mut lang = test_lang();
+    add_rule(
+        &mut lang,
+        rule_with_when(TransformCondition::AttrEq {
+            path: vec![1],
+            attr: "dim".into(),
+            value: None, // presence only — a bound attr metavariable
+        }),
+    );
+    let mut ast = Ast::new();
+    ast.push(leaf("var", json!("x"))); // 0
+    ast.push(attr_node(json!({"dim": -1}), &[])); // 1 — has dim
+    ast.push(node("a", &[0, 1])); // 2 — fires
+    ast.push(leaf("var", json!("y"))); // 3
+    ast.push(node("a", &[0, 3])); // 4 — child 1 is a var leaf, no attrs
+    let out = RewriteEngine::new()
+        .run_pass(&lang, &ast, root(&ast), "p")
+        .unwrap();
+    assert_eq!(out.stats.rewritten, 1);
+}
+
+#[test]
+fn condition_same_attr_equality() {
+    let mut lang = test_lang();
+    add_rule(
+        &mut lang,
+        rule_with_when(TransformCondition::SameAttr {
+            path_a: vec![0],
+            attr_a: "dim".into(),
+            path_b: vec![1],
+            attr_b: "dim".into(),
+        }),
+    );
+    let mut ast = Ast::new();
+    ast.push(attr_node(json!({"dim": 1}), &[])); // 0
+    ast.push(attr_node(json!({"dim": 1}), &[])); // 1 — equal
+    ast.push(node("a", &[0, 1])); // 2 — fires
+    ast.push(attr_node(json!({"dim": 2}), &[])); // 3
+    ast.push(node("a", &[0, 3])); // 4 — dims differ
+    ast.push(node("a", &[0, 0])); // 5 — same node twice: equal, fires
+    let out = RewriteEngine::new()
+        .run_pass(&lang, &ast, root(&ast), "p")
+        .unwrap();
+    // nodes 2 and 5 both satisfy the equality.
+    assert_eq!(out.stats.rewritten, 2);
+}
+
+// --- $attr_of payload markers ----------------------------------------------
+
+#[test]
+fn attr_of_marker_copies_attr_into_created_node() {
+    let mut lang = test_lang();
+    add_rule(
+        &mut lang,
+        TransformDef::new(
+            "t.attrcopy",
+            "p",
+            "a",
+            TransformRule::Declarative {
+                target_kind: "b".into(),
+                children: vec![],
+                payload: Some(json!({
+                    "attrs": {"dim": {"$attr_of": {"path": [0], "attr": "dim"}}}
+                })),
+            },
+        ),
+    );
+    let mut ast = Ast::new();
+    ast.push(attr_node_kind("c", json!({"dim": -1}), &[])); // 0 — attr source
+    ast.push(node("a", &[0])); // 1 — matched node
+    let out = RewriteEngine::new()
+        .run_pass(&lang, &ast, root(&ast), "p")
+        .unwrap();
+    let rewritten = out.ast.at(out.root).unwrap();
+    assert_eq!(rewritten.kind, "b");
+    assert_eq!(
+        rewritten.payload.get("attrs").and_then(|a| a.get("dim")),
+        Some(&json!(-1))
+    );
+}
+
+#[test]
+fn attr_of_marker_inside_create_payload() {
+    let mut lang = test_lang();
+    add_rule(
+        &mut lang,
+        TransformDef::new(
+            "t.attrcopy2",
+            "p",
+            "a",
+            TransformRule::Declarative {
+                target_kind: "b".into(),
+                children: vec![RewriteStep::Create {
+                    kind: "c".into(),
+                    payload: Some(json!({
+                        "attrs": {"dim": {"$attr_of": {"attr": "dim"}}}
+                    })),
+                    children: vec![],
+                }],
+                payload: None,
+            },
+        ),
+    );
+    let mut ast = Ast::new();
+    // The matched node itself carries the attr (empty marker path).
+    ast.push(AstNode::new("a").with_payload(json!({
+        "attrs": {"dim": 3},
+        "children": []
+    })));
+    let out = RewriteEngine::new()
+        .run_pass(&lang, &ast, root(&ast), "p")
+        .unwrap();
+    let rewritten = out.ast.at(out.root).unwrap();
+    let child_idx = rewritten
+        .payload
+        .get("children")
+        .and_then(|c| c.as_array())
+        .and_then(|a| a.first())
+        .and_then(|v| v.as_u64())
+        .unwrap() as usize;
+    let created = out.ast.at(AstRef::new(child_idx)).unwrap();
+    assert_eq!(created.kind, "c");
+    assert_eq!(
+        created.payload.get("attrs").and_then(|a| a.get("dim")),
+        Some(&json!(3))
+    );
+}
+
+#[test]
+fn attr_of_marker_unresolvable_is_an_error() {
+    let mut lang = test_lang();
+    add_rule(
+        &mut lang,
+        TransformDef::new(
+            "t.attrbad",
+            "p",
+            "a",
+            TransformRule::Declarative {
+                target_kind: "b".into(),
+                children: vec![],
+                payload: Some(json!({
+                    "attrs": {"dim": {"$attr_of": {"path": [7], "attr": "dim"}}}
+                })),
+            },
+        ),
+    );
+    let mut ast = Ast::new();
+    ast.push(node("a", &[]));
+    let result = RewriteEngine::new().run_pass(&lang, &ast, root(&ast), "p");
+    assert!(result.is_err(), "an unresolvable marker must fail loudly");
+}
+
 // --- Ordering / stats / trace ------------------------------------------------
 
 #[test]

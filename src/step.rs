@@ -14,7 +14,7 @@
 
 use std::collections::HashMap;
 
-use handl_language::{Ast, AstNode, AstRef, LangError, Language, RewriteStep};
+use handl_language::{Ast, AstNode, AstRef, LangError, Language, PAYLOAD_ATTR_OF, RewriteStep};
 use serde_json::{Map, Value};
 
 /// How a step interpreter obtains output-arena indices for input-arena
@@ -120,6 +120,13 @@ pub(crate) fn build_rewrite(
     // A non-object `patch` replaces the payload outright; when the rewrite
     // also builds children they take precedence (a scalar payload cannot
     // carry a `children` key).
+    // `PAYLOAD_ATTR_OF` markers in the patch copy attr values off the
+    // matched subtree (the mlopt bridge's attr_rhs channel) — resolve
+    // them against the input arena before the shallow merge.
+    let patch = patch
+        .map(|p| resolve_attr_markers(p, ast, original))
+        .transpose()?;
+    let patch = patch.as_ref();
     let mut payload: Value = match patch {
         Some(Value::Object(obj)) => {
             let mut merged = original.payload.as_object().cloned().unwrap_or_default();
@@ -312,12 +319,20 @@ fn build_step(
                 .into_iter()
                 .flatten()
                 .collect();
+            // `PAYLOAD_ATTR_OF` markers copy attr values off the matched
+            // subtree into the created node (the mlopt bridge's attr_rhs
+            // channel) — resolved against the input arena, same as the
+            // `Declarative` patch in `build_rewrite`.
+            let payload = payload
+                .as_ref()
+                .map(|p| resolve_attr_markers(p, ast, original))
+                .transpose()?;
             let node_payload = if child_indices.is_empty() {
                 payload.clone().unwrap_or(Value::Null)
             } else {
                 let mut p = Map::new();
                 p.insert("children".to_string(), Value::Array(child_indices));
-                if let Some(extra) = payload
+                if let Some(extra) = payload.as_ref()
                     && let Some(obj) = extra.as_object()
                 {
                     for (k, v) in obj {
@@ -347,6 +362,79 @@ fn build_step(
             None => Ok(vec![Value::Null]),
         },
     }
+}
+
+/// Resolve [`PAYLOAD_ATTR_OF`] markers inside a payload `Value` against
+/// `original`'s subtree in the input arena `ast`.
+///
+/// A marker is an object of exactly one key — `{"$attr_of": {"path":
+/// […], "attr": "name"}}` — naming the descendant reached by child-index
+/// `path` below the matched node (empty `path` = the matched node
+/// itself) and the attr to copy out of that node's `payload["attrs"]`.
+/// Resolution recurses through objects and arrays. An unresolvable
+/// marker — bad shape, missing descendant, absent `attrs`/attr — is a
+/// [`LangError`], never a silently fabricated value.
+fn resolve_attr_markers(value: &Value, ast: &Ast, original: &AstNode) -> Result<Value, LangError> {
+    match value {
+        Value::Object(obj) => {
+            if obj.len() == 1
+                && let Some(spec) = obj.get(PAYLOAD_ATTR_OF)
+            {
+                return resolve_attr_of(spec, ast, original);
+            }
+            let mut out = Map::with_capacity(obj.len());
+            for (k, v) in obj {
+                out.insert(k.clone(), resolve_attr_markers(v, ast, original)?);
+            }
+            Ok(Value::Object(out))
+        }
+        Value::Array(arr) => arr
+            .iter()
+            .map(|v| resolve_attr_markers(v, ast, original))
+            .collect::<Result<Vec<_>, _>>()
+            .map(Value::Array),
+        _ => Ok(value.clone()),
+    }
+}
+
+/// Resolve one `{"path": […], "attr": "name"}` marker spec to the attr
+/// value it names on `original`'s subtree.
+fn resolve_attr_of(spec: &Value, ast: &Ast, original: &AstNode) -> Result<Value, LangError> {
+    let bad = || {
+        LangError::engine(format!(
+            "malformed {PAYLOAD_ATTR_OF} marker {spec} — want \
+             {{\"path\": [<child indices>], \"attr\": \"<name>\"}}"
+        ))
+    };
+    let obj = spec.as_object().ok_or_else(bad)?;
+    let attr = obj.get("attr").and_then(Value::as_str).ok_or_else(bad)?;
+    let path: Vec<usize> = match obj.get("path") {
+        // Absent/`null` path names the matched node itself.
+        None | Some(Value::Null) => Vec::new(),
+        Some(v) => v
+            .as_array()
+            .ok_or_else(bad)?
+            .iter()
+            .map(|v| v.as_u64().map(|n| n as usize).ok_or_else(bad))
+            .collect::<Result<_, _>>()?,
+    };
+    // Empty path names the matched node itself; otherwise navigate the
+    // input arena's child indices (same walk as `KeepPath`).
+    let node = if path.is_empty() {
+        Some(original)
+    } else {
+        descendant_index(ast, original, &path).and_then(|idx| ast.get(AstRef::new(idx)))
+    };
+    let value = node
+        .and_then(|n| n.payload.get("attrs"))
+        .and_then(|a| a.get(attr))
+        .ok_or_else(|| {
+            LangError::engine(format!(
+                "{PAYLOAD_ATTR_OF} marker {spec} does not resolve — \
+                 the matched subtree has no attrs.{attr} at that path"
+            ))
+        })?;
+    Ok(value.clone())
 }
 
 /// `Keep`-family helper: resolve `original`'s child `i` into the output
