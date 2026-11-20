@@ -10,10 +10,10 @@ plans are interpreted from `lang.transforms` data over the `Term`/AST IR.
 ## Development
 
 ```bash
-cargo xtask gate        # fmt --check → clippy -D warnings → test → doc
+cargo run --manifest-path xtask/Cargo.toml -- gate   # fmt → clippy → test → doc
 ```
 
-`cargo xtask` wraps the repo's `xtask/` crate (`fmt`, `clippy`, `test`, `doc`,
+The repo's `xtask/` crate provides the gate tasks (`fmt`, `clippy`, `test`, `doc`,
 `check`, `gate`); `ci.sh` is the gate entry. Deps resolve from git, so no
 sibling checkouts are needed; a plain clone test-runs as-is.
 
