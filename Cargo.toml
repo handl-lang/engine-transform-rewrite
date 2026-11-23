@@ -21,7 +21,7 @@ serde_json = "1"
 
 [dev-dependencies]
 handl-runtime = { git = "https://github.com/handl-lang/host", branch = "main" }
-handl-kit-data-prelude = { git = "https://github.com/handl-lang/kit-data-prelude", branch = "main" }
+handl-kit-data-prelude = { git = "https://github.com/handl-lang/host", branch = "main" }
 serde_json = "1"
 criterion = "0.5"
 
