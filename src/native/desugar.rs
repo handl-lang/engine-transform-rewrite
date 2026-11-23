@@ -427,8 +427,34 @@ fn collect_constructors(
                     .map(|n| extract_result_indices_from_type(lang, n, ast, params.len()))
                     .unwrap_or_else(|| vec![None; params.len()]);
                 if let Some(cons_idx) = cons_idx
-                    && let Some(cons_node) = ast.get(AstRef::new(cons_idx))
+                    && let Some(mut cons_node) = ast.get(AstRef::new(cons_idx))
                 {
+                    // Peel nested `type-annot` wrappers down to the ctor
+                    // leaf (`var`/`call`): a doubly-wrapped subject would
+                    // otherwise fall through `collect_constructor_leaf`'s
+                    // match and the constructor would be silently dropped —
+                    // the same descent `engine-typecheck`'s
+                    // `collect_data_ctors` and `engine-typecheck-nbe`'s
+                    // `collect_ctors` perform. The outer `annot` stays the
+                    // declared result either way.
+                    while cons_node.kind == "type-annot" {
+                        let inner = lang
+                            .child_role_index(&cons_node.kind, "subject")
+                            .ok()
+                            .flatten()
+                            .unwrap_or(0);
+                        let Some(next) = cons_node
+                            .payload
+                            .get("children")
+                            .and_then(|c| c.as_array())
+                            .and_then(|arr| arr.get(inner))
+                            .and_then(|v| v.as_u64())
+                            .and_then(|i| ast.get(AstRef::new(i as usize)))
+                        else {
+                            break;
+                        };
+                        cons_node = next;
+                    }
                     collect_constructor_leaf(lang, cons_node, ast, out, params, result_indices);
                 }
             }
@@ -3543,6 +3569,169 @@ mod tests {
             params[0],
             json!("value"),
             "type-annot arg name should be 'value', not a placeholder"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // ADR-0158 record lowering: indexed nullary ctors (`VNil : Vec(0, a)`)
+    // -----------------------------------------------------------------------
+
+    /// `data` node for `Vec<n : Nat, a : Type>` whose ctor list is the
+    /// record-lowered `alt` — `VNil`'s `type-annot` subject is `inner`, the
+    /// node the record lowering emitted under the result wrap (a bare `var`
+    /// post-fix; the retired double wrap nests another `type-annot`).
+    fn indexed_family_ast(inner: impl Fn(&mut Ast, usize) -> usize) -> (Language, Ast) {
+        let mut lang = Language::new();
+        lang.ast
+            .merge(AstShapeDef::new("ast.data", "data"))
+            .unwrap();
+        lang.ast
+            .merge(
+                AstShapeDef::new("ast.type-annot", "type-annot").with_children(vec![
+                    ChildRoleSpec {
+                        role: "subject".into(),
+                        variadic: false,
+                        optional: false,
+                    },
+                    ChildRoleSpec {
+                        role: "annot".into(),
+                        variadic: false,
+                        optional: false,
+                    },
+                ]),
+            )
+            .unwrap();
+
+        let mut ast = Ast::new();
+        let push = |ast: &mut Ast, kind: &str, payload: Value| {
+            ast.push(AstNode::new(kind).with_payload(payload)).index()
+        };
+        // Head: call(Vec, type-annot(n, Nat), type-annot(a, Type)).
+        let n = push(&mut ast, "var", json!("n"));
+        let nat = push(&mut ast, "var", json!("Nat"));
+        let n_annot = push(&mut ast, "type-annot", json!({"children": [n, nat]}));
+        let a = push(&mut ast, "var", json!("a"));
+        let typ = push(&mut ast, "var", json!("Type"));
+        let a_annot = push(&mut ast, "type-annot", json!({"children": [a, typ]}));
+        let vec = push(&mut ast, "var", json!("Vec"));
+        let head = push(
+            &mut ast,
+            "dimension",
+            json!({"children": [vec, n_annot, a_annot]}),
+        );
+        // Result `Vec(0, a)` for VNil.
+        let vec2 = push(&mut ast, "var", json!("Vec"));
+        let zero = push(&mut ast, "lit", json!(0));
+        let a2 = push(&mut ast, "var", json!("a"));
+        let vnil_result = push(
+            &mut ast,
+            "call",
+            json!({"children": [vec2, zero, a2]}),
+        );
+        let vnil_leaf = push(&mut ast, "var", json!("VNil"));
+        let vnil_subject = inner(&mut ast, vnil_leaf);
+        let vnil = push(
+            &mut ast,
+            "type-annot",
+            json!({"children": [vnil_subject, vnil_result], "name": "VNil"}),
+        );
+        // VCons : (x : a, xs : Vec(n, a)) ~> Vec(n, a) — argumented ctor.
+        let vcons_name = push(&mut ast, "var", json!("VCons"));
+        let x = push(&mut ast, "var", json!("x"));
+        let a3 = push(&mut ast, "var", json!("a"));
+        let x_annot = push(&mut ast, "type-annot", json!({"children": [x, a3]}));
+        let xs = push(&mut ast, "var", json!("xs"));
+        let vec3 = push(&mut ast, "var", json!("Vec"));
+        let n3 = push(&mut ast, "var", json!("n"));
+        let a4 = push(&mut ast, "var", json!("a"));
+        let vec_na = push(
+            &mut ast,
+            "call",
+            json!({"children": [vec3, n3, a4]}),
+        );
+        let xs_annot = push(&mut ast, "type-annot", json!({"children": [xs, vec_na]}));
+        let vcons_call = push(
+            &mut ast,
+            "call",
+            json!({"children": [vcons_name, x_annot, xs_annot]}),
+        );
+        let vec4 = push(&mut ast, "var", json!("Vec"));
+        let n4 = push(&mut ast, "var", json!("n"));
+        let a5 = push(&mut ast, "var", json!("a"));
+        let vcons_result = push(
+            &mut ast,
+            "call",
+            json!({"children": [vec4, n4, a5]}),
+        );
+        let vcons = push(
+            &mut ast,
+            "type-annot",
+            json!({"children": [vcons_call, vcons_result], "name": "VCons"}),
+        );
+        let alt = push(&mut ast, "alt", json!({"children": [vnil, vcons]}));
+        push(
+            &mut ast,
+            "data",
+            json!({"children": [head, alt], "name": "Vec"}),
+        );
+        (lang, ast)
+    }
+
+    /// The ctor assigns a desugared `data` block binds, by target name.
+    fn bound_names(out: &Ast) -> Vec<String> {
+        let root = out.nodes().last().unwrap();
+        assert_eq!(root.kind, "block");
+        root.payload["children"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|c| {
+                let assign = out.get(AstRef::new(c.as_u64().unwrap() as usize))?;
+                if assign.kind != "assign" {
+                    return None;
+                }
+                let kids = assign.payload["children"].as_array()?;
+                let target = out.get(AstRef::new(kids[0].as_u64()? as usize))?;
+                (target.kind == "var")
+                    .then(|| target.payload.as_str().unwrap_or("").to_string())
+            })
+            .collect()
+    }
+
+    #[test]
+    fn data_record_indexed_nullary_ctor_is_collected() {
+        // Post-fix record lowering: `type-annot(var VNil, Vec(0, a))` —
+        // exactly one wrap. Both ctors must reach the desugared block.
+        let (lang, ast) = indexed_family_ast(|_, leaf| leaf);
+        let out = apply_desugar(&lang, &ast);
+        let names = bound_names(&out);
+        assert!(
+            names.iter().any(|n| n == "VNil"),
+            "VNil must be bound — a `type-annot` leaf subject used to drop it: {names:?}"
+        );
+        assert!(names.iter().any(|n| n == "VCons"), "{names:?}");
+        // former + 2 ctors + recursor.
+        assert_eq!(out.nodes().last().unwrap().payload["children"].as_array().unwrap().len(), 4);
+    }
+
+    #[test]
+    fn data_record_double_wrapped_ctor_still_collected() {
+        // Defensive: a nested `type-annot` subject (the retired double
+        // wrap) peels to the same leaf rather than dropping the ctor.
+        let (lang, ast) = indexed_family_ast(|ast, leaf| {
+            // Inner wrap `type-annot(leaf, Vec)` — the peel reads only the
+            // subject chain, so the inner annot is a stand-in.
+            let vec = ast.push(AstNode::new("var").with_payload(json!("Vec")));
+            ast.push(
+                AstNode::new("type-annot").with_payload(json!({"children": [leaf, vec]})),
+            )
+            .index()
+        });
+        let out = apply_desugar(&lang, &ast);
+        let names = bound_names(&out);
+        assert!(
+            names.iter().any(|n| n == "VNil"),
+            "double-wrapped VNil must still be collected: {names:?}"
         );
     }
 
