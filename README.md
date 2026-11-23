@@ -4,7 +4,7 @@
 rule-interpreting rewriting engine that generalizes the legacy
 `handl-runtime::desugar_pass` machinery.
 
-An `engine-*` crate: a concrete transform engine — passes, pipelines, and
+A `tool-*` crate: a concrete transform engine — passes, pipelines, and
 plans are interpreted from `lang.transforms` data over the `Term`/AST IR.
 
 ## Development
