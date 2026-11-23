@@ -15,7 +15,7 @@
 type NativeRewriteFn = Box<dyn Fn(&mut RewriteCtx<'_>) -> Result<AstRef, LangError> + Send + Sync>;
 
 use handl_language::{Ast, AstNode, AstRef, LangError, Language};
-use hnl_engine_transform::native::{NativeRewriteRegistry, RewriteCtx};
+use hnl_tool_transform::native::{NativeRewriteRegistry, RewriteCtx};
 use serde_json::Value;
 use std::collections::HashMap;
 use std::sync::OnceLock;
@@ -433,8 +433,8 @@ fn collect_constructors(
                     // leaf (`var`/`call`): a doubly-wrapped subject would
                     // otherwise fall through `collect_constructor_leaf`'s
                     // match and the constructor would be silently dropped —
-                    // the same descent `engine-typecheck`'s
-                    // `collect_data_ctors` and `engine-typecheck-nbe`'s
+                    // the same descent `tool-typecheck`'s
+                    // `collect_data_ctors` and `tool-typecheck-nbe`'s
                     // `collect_ctors` perform. The outer `annot` stays the
                     // declared result either way.
                     while cons_node.kind == "type-annot" {

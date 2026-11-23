@@ -1,6 +1,6 @@
-# engine-transform-rewrite
+# tool-transform-rewrite
 
-`hnl-engine-transform-rewrite` — the first `TransformEngine` implementation: a
+`hnl-tool-transform-rewrite` — the first `TransformEngine` implementation: a
 rule-interpreting rewriting engine that generalizes the legacy
 `handl-runtime::desugar_pass` machinery.
 
@@ -23,4 +23,4 @@ MIT.
 
 ## Documentation
 
-<https://handl-lang.github.io/docs/engine-transform-rewrite/>
+<https://handl-lang.github.io/docs/tool-transform-rewrite/>

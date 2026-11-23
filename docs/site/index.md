@@ -1,4 +1,4 @@
-# engine-transform-rewrite
+# tool-transform-rewrite
 
 The rule-interpreting transform engine (ADR-0094).
 
@@ -12,9 +12,9 @@ checks in the engine core.
 
 ## Start here
 
-- **Reference** — [public API](/engine-transform-rewrite/reference/)
-- **How-to** — [task recipes](/engine-transform-rewrite/how-to/)
-- **Explanation** — [design and rationale](/engine-transform-rewrite/explanation/)
+- **Reference** — [public API](/tool-transform-rewrite/reference/)
+- **How-to** — [task recipes](/tool-transform-rewrite/how-to/)
+- **Explanation** — [design and rationale](/tool-transform-rewrite/explanation/)
 
 No tutorials: this repo is a building block used from Rust. End-to-end
 walkthroughs live with the product that composes it — see the

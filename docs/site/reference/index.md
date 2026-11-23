@@ -13,7 +13,7 @@
 
 | crate | role |
 |---|---|
-| `hnl-engine-transform-rewrite` | engine implementation |
+| `hnl-tool-transform-rewrite` | engine implementation |
 
 ## Build and test
 

@@ -1,4 +1,4 @@
-# bupha.toml — committed CI manifest for handl-lang/engine-transform-rewrite.
+# bupha.toml — committed CI manifest for handl-lang/tool-transform-rewrite.
 #
 # The runner is this repo's ci.sh (fmt -> clippy -D warnings -> test -> doc),
 # executed natively in a detached worktree of the pushed sha. Merge the
@@ -6,8 +6,8 @@
 # a dedicated instance with: bupha watch --config bupha.toml
 
 [[repos]]
-name = "handl-lang/engine-transform-rewrite"
-dir = "~/GitHub/handl-lang/engine-transform-rewrite"
+name = "handl-lang/tool-transform-rewrite"
+dir = "~/GitHub/handl-lang/tool-transform-rewrite"
 branch = "refs/heads/main"
   [repos.runner]
   kind = "script"
