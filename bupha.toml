@@ -7,7 +7,7 @@
 
 [[repos]]
 name = "handl-lang/engine-transform-rewrite"
-dir = "/home/luis/GitHub/handl-lang/engine-transform-rewrite"
+dir = "~/GitHub/handl-lang/engine-transform-rewrite"
 branch = "refs/heads/main"
   [repos.runner]
   kind = "script"
