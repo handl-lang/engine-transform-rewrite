@@ -3623,11 +3623,7 @@ mod tests {
         let vec2 = push(&mut ast, "var", json!("Vec"));
         let zero = push(&mut ast, "lit", json!(0));
         let a2 = push(&mut ast, "var", json!("a"));
-        let vnil_result = push(
-            &mut ast,
-            "call",
-            json!({"children": [vec2, zero, a2]}),
-        );
+        let vnil_result = push(&mut ast, "call", json!({"children": [vec2, zero, a2]}));
         let vnil_leaf = push(&mut ast, "var", json!("VNil"));
         let vnil_subject = inner(&mut ast, vnil_leaf);
         let vnil = push(
@@ -3644,11 +3640,7 @@ mod tests {
         let vec3 = push(&mut ast, "var", json!("Vec"));
         let n3 = push(&mut ast, "var", json!("n"));
         let a4 = push(&mut ast, "var", json!("a"));
-        let vec_na = push(
-            &mut ast,
-            "call",
-            json!({"children": [vec3, n3, a4]}),
-        );
+        let vec_na = push(&mut ast, "call", json!({"children": [vec3, n3, a4]}));
         let xs_annot = push(&mut ast, "type-annot", json!({"children": [xs, vec_na]}));
         let vcons_call = push(
             &mut ast,
@@ -3658,11 +3650,7 @@ mod tests {
         let vec4 = push(&mut ast, "var", json!("Vec"));
         let n4 = push(&mut ast, "var", json!("n"));
         let a5 = push(&mut ast, "var", json!("a"));
-        let vcons_result = push(
-            &mut ast,
-            "call",
-            json!({"children": [vec4, n4, a5]}),
-        );
+        let vcons_result = push(&mut ast, "call", json!({"children": [vec4, n4, a5]}));
         let vcons = push(
             &mut ast,
             "type-annot",
@@ -3692,8 +3680,7 @@ mod tests {
                 }
                 let kids = assign.payload["children"].as_array()?;
                 let target = out.get(AstRef::new(kids[0].as_u64()? as usize))?;
-                (target.kind == "var")
-                    .then(|| target.payload.as_str().unwrap_or("").to_string())
+                (target.kind == "var").then(|| target.payload.as_str().unwrap_or("").to_string())
             })
             .collect()
     }
@@ -3711,7 +3698,13 @@ mod tests {
         );
         assert!(names.iter().any(|n| n == "VCons"), "{names:?}");
         // former + 2 ctors + recursor.
-        assert_eq!(out.nodes().last().unwrap().payload["children"].as_array().unwrap().len(), 4);
+        assert_eq!(
+            out.nodes().last().unwrap().payload["children"]
+                .as_array()
+                .unwrap()
+                .len(),
+            4
+        );
     }
 
     #[test]
@@ -3722,10 +3715,8 @@ mod tests {
             // Inner wrap `type-annot(leaf, Vec)` — the peel reads only the
             // subject chain, so the inner annot is a stand-in.
             let vec = ast.push(AstNode::new("var").with_payload(json!("Vec")));
-            ast.push(
-                AstNode::new("type-annot").with_payload(json!({"children": [leaf, vec]})),
-            )
-            .index()
+            ast.push(AstNode::new("type-annot").with_payload(json!({"children": [leaf, vec]})))
+                .index()
         });
         let out = apply_desugar(&lang, &ast);
         let names = bound_names(&out);

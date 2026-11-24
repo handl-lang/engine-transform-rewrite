@@ -151,13 +151,13 @@ impl RewriteEngine {
         // the Rust natives (which stay registered under the same names as
         // the bootstrap/fallback layer).
         let base: Arc<dyn NativeRewrite> = Arc::new(native::desugar_native_registry());
-        let natives: Arc<dyn NativeRewrite> =
-            match hnl_tool_transform::native::transform_overlay() {
-                Some(overlay) => Arc::new(hnl_tool_transform::native::ChainedRewrite::new(vec![
-                    overlay, base,
-                ])),
-                None => base,
-            };
+        let natives: Arc<dyn NativeRewrite> = match hnl_tool_transform::native::transform_overlay()
+        {
+            Some(overlay) => Arc::new(hnl_tool_transform::native::ChainedRewrite::new(vec![
+                overlay, base,
+            ])),
+            None => base,
+        };
         let mut engine = self.with_native_registry(natives);
         for (kind, name) in native::DESUGAR_NATIVES {
             engine
