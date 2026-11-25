@@ -2,6 +2,7 @@
 name = "hnl-tool-transform-rewrite"
 version = "0.1.0"
 edition = "2024"
+rust-version = "1.85"
 description = "The first [`TransformEngine`] implementation (ADR-0094): a rule-interpreting rewriting engine that generalizes the legacy `handl-runtime::desugar_pass` machinery."
 license = "MIT"
 repository = "https://github.com/handl-lang/tool-transform-rewrite"
