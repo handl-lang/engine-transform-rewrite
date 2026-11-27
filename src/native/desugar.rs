@@ -1171,18 +1171,24 @@ fn index_expr_to_ast(
 }
 
 /// Desugar a `data` declaration into a `block` of definitions per
-/// ADR-0152: `F` binds a seeded-sym nominal former, each constructor is a
-/// nominal arrow producing a `{"__ctor__": cSym, …}` object carrying a
-/// `type` link to `F(j⃗)`, and `F.rec` is the dependent eliminator whose
-/// iota reduction is the recursor fold machine.
+/// ADR-0152: each constructor is a nominal arrow producing a
+/// `{"__ctor__": cSym, …}` object carrying a `type` link to `F(j⃗)`,
+/// `F.rec` is the dependent eliminator whose iota reduction is the
+/// recursor fold machine, and `F` itself binds the *family record* —
+/// a value carrying every constructor under its name, the eliminator
+/// under `rec`, and the nominal `__former__` sym — so `export F` and
+/// `F.C` reach the constructors through the family value (Design A).
 ///
 /// `data Vec(n : Nat, a : Type) :: VNil : Vec(0, a) | VCons(x : a, xs : Vec(n, a)) : Vec(n + 1, a)`
 /// desugars to a `block` containing:
-/// - `Vec = (n, a) -> {"__former__": vecSym, "indices": [n, a]}`
 /// - `VNil = {"__ctor__": vnilSym, "type": {"__former__": vecSym, "indices": [0, null]}}`
 /// - `VCons = (x, xs) -> {"__ctor__": vconsSym, "x": x, "xs": xs,
 ///     "type": {"__former__": vecSym, "indices": [xs.type.indices[0] + 1, xs.type.indices[1]]}}`
 /// - `Vec.rec = (motive, cVNil, cVCons) -> <fold, decreasing on the ctor spine>`
+/// - `Vec = { VNil: VNil, VCons: VCons, rec: Vec.rec, __former__: vecSym,
+///   __term__: (__in) -> {"__former__": vecSym, "indices": [__in[0], __in[1]]},
+///   __bound__: [] }` — the bound-arrow `__term__` keeps `Vec(n, a)`
+///   producing the canonical family-application object.
 fn desugar_data(lang: &Language, original: &AstNode, ast: &Ast, out: &mut Ast) -> Option<AstRef> {
     let (type_name, params, constructors) = parse_data_payload(lang, original, ast)?;
 
@@ -1200,25 +1206,15 @@ fn desugar_data(lang: &Language, original: &AstNode, ast: &Ast, out: &mut Ast) -
 
     let mut stmts: Vec<usize> = Vec::new();
 
-    // 1. The former: `F` binds the family's nominal identity.
-    //    `F(i⃗)` produces the canonical `{"__former__": fSym, "indices": i⃗}`
-    //    object — family equality is nominal head + structural indices
-    //    (ADR-0152 §1), not a predicate-arrow membership test.
-    let index_vars: Vec<usize> = params.iter().map(|p| push_var_node(out, &p.name)).collect();
-    let former_obj = push_family_app(out, &type_name, index_vars);
-    let f_value = if params.is_empty() {
-        former_obj
-    } else {
-        let pref: Vec<&str> = params.iter().map(|p| p.name.as_str()).collect();
-        push_function(out, &pref, former_obj)
-    };
-    let f_target = push_leaf(out, "var", Value::from(type_name.clone()));
-    stmts.push(push_node(out, "assign", vec![f_target, f_value]));
-
-    // 2. Constructors — nominal arrows into the family. `Cⱼ(x⃗)` produces
+    // 1. Constructors — nominal arrows into the family. `Cⱼ(x⃗)` produces
     //    `{"__ctor__": cSym, x⃗…, "type": F(j⃗)}`: identity is the sym
     //    (match dispatches on it, never a `{"tag"}` string) and the
     //    `type` link is the declared membership (ADR-0154 §2).
+    //
+    //    The ctor assigns run *first*: the family record bound to `F`
+    //    below references each constructor by name, so they must be in
+    //    scope before `F` evaluates (Design A — "ctors are just values
+    //    too").
     for cons in &constructors {
         let ctor_sym = push_sym_lit(out, &ctor_seed(&type_name, &cons.name));
         let param_vals = param_extractors(out, &type_name, &params, cons);
@@ -1299,8 +1295,64 @@ fn desugar_data(lang: &Language, original: &AstNode, ast: &Ast, out: &mut Ast) -
     let rec_assign = push_node(out, "assign", vec![rec_target, rec_region]);
     stmts.push(rec_assign);
 
+    // 4. The family value (Design A — "ctors are just values too"):
+    //    `F` binds a record carrying every constructor under its name,
+    //    the eliminator under `rec`, and the family's nominal identity
+    //    under `__former__` (a bare seeded `Sym`, the same payload
+    //    `push_family_app` puts in `{"__former__": …}` — so
+    //    `nominal_head`/`instanceof` keep resolving `F` to the family
+    //    nominal). `export F` / `F.C` therefore reach the constructors
+    //    through the family value itself instead of relying on sibling
+    //    scope bindings a module record cannot see.
+    //
+    //    Field order puts the reserved keys (`rec`, `__former__`,
+    //    `__term__`, `__bound__`) *after* the constructor fields so a
+    //    constructor that happens to share one of those names cannot
+    //    shadow the machinery (last duplicate key wins at object eval).
+    //
+    //    A parametric family stays applicable: `F(i⃗)` still produces
+    //    the canonical `{"__former__": fSym, "indices": i⃗}` object via
+    //    the `{__term__, __bound__}` bound-arrow convention (the same
+    //    record shape `F.rec` uses — `apply_app` runs `__term__` on
+    //    `__bound__ ++ args` as one flat tuple). A parameter-free
+    //    family stays a plain non-callable record, matching the former
+    //    object it replaces.
+    let former_sym = push_sym_lit(out, &former_seed(&type_name));
+    let mut fields: Vec<(&str, usize)> = Vec::with_capacity(constructors.len() + 4);
+    for cons in &constructors {
+        let v = push_leaf(out, "var", Value::from(cons.name.clone()));
+        fields.push((cons.name.as_str(), v));
+    }
+    let rec_field_var = push_leaf(out, "var", Value::from(rec_name.clone()));
+    fields.push(("rec", rec_field_var));
+    fields.push(("__former__", former_sym));
+    if !params.is_empty() {
+        // `__term__`: `(__in) -> {"__former__": fSym, "indices":
+        // [__in[0], …, __in[n-1]]}` — `F(i⃗)` applies the bound arrow
+        // with the index tuple as `__in`.
+        let in_var = push_var_node(out, "__in");
+        let idx_elems: Vec<usize> = (0..params.len())
+            .map(|j| push_fai(out, in_var, j))
+            .collect();
+        let idx_arr = push_node(out, "array", idx_elems);
+        let term_body = push_object_node(out, &[("__former__", former_sym), ("indices", idx_arr)]);
+        let term_fn = push_function(out, &["__in"], term_body);
+        fields.push(("__term__", term_fn));
+        // `__bound__` is the empty array: `apply_app` prepends its
+        // elements to the call args, so `[]` leaves `__in` = the index
+        // tuple itself. (`push_node` writes a `null` payload for empty
+        // children — emit the empty `children` array explicitly.)
+        let bound_idx = out
+            .push(AstNode::new("array").with_payload(serde_json::json!({ "children": [] })))
+            .index();
+        fields.push(("__bound__", bound_idx));
+    }
+    let family_obj = push_object_node(out, &fields);
+    let f_target = push_leaf(out, "var", Value::from(type_name.clone()));
+    stmts.push(push_node(out, "assign", vec![f_target, family_obj]));
+
     // The emitted block is a *declaration group*, not a scope: its
-    // assigns (former, ctors, recursor) must bind in the enclosing
+    // assigns (ctors, recursor, family record) must bind in the enclosing
     // statement list — a nested `block` child would scope them away and
     // `Succ(Zero)` in a following statement would be unbound. The
     // `__splice__` flag tells the desugar pass to splice this node's
@@ -2967,11 +3019,11 @@ mod tests {
     }
 
     #[test]
-    fn data_nat_former_is_canonical_object() {
-        // ADR-0152: `Nat` binds a nominal former — for a parameter-free
-        // family the former is the canonical `{"__former__": sym,
-        // "indices": []}` object itself (parameterized families bind an
-        // arrow returning that object).
+    fn data_family_record_carries_ctors_rec_and_former() {
+        // Design A: `Nat` binds the *family record* — an object carrying
+        // every constructor under its name, the eliminator under `rec`,
+        // and the nominal `__former__` sym (a parameter-free family has
+        // no `__term__`/`__bound__`).
         let mut lang = Language::new();
         lang.ast
             .merge(AstShapeDef::new("ast.data", "data"))
@@ -2987,33 +3039,39 @@ mod tests {
         assert_eq!(root.kind, "block");
         let children = root.payload.get("children").unwrap().as_array().unwrap();
 
-        // First statement: Nat = {"__former__": natSym, "indices": []}
-        let pred_assign = out
-            .get(AstRef::new(children[0].as_u64().unwrap() as usize))
-            .unwrap();
-        assert_eq!(pred_assign.kind, "assign");
-        let pred_children = pred_assign
+        // The family assign is the last statement: `Nat = { Zero: …,
+        // Succ: …, rec: Nat.rec, __former__: natSym }`.
+        let fam_idx = find_assign(&out, children, "Nat").expect("family assign");
+        let fam_assign = out.get(AstRef::new(fam_idx)).unwrap();
+        let fam_children = fam_assign
             .payload
             .get("children")
             .unwrap()
             .as_array()
             .unwrap();
-        // Target: var("Nat")
-        let target = out
-            .get(AstRef::new(pred_children[0].as_u64().unwrap() as usize))
-            .unwrap();
-        assert_eq!(target.kind, "var");
-        assert_eq!(target.payload, json!("Nat"));
-        // Value: an `object` node whose first entry is `__former__`.
         let value = out
-            .get(AstRef::new(pred_children[1].as_u64().unwrap() as usize))
+            .get(AstRef::new(fam_children[1].as_u64().unwrap() as usize))
             .unwrap();
         assert_eq!(value.kind, "object");
-        let entry_idx = value.payload["children"][0].as_u64().unwrap() as usize;
-        let entry = out.get(AstRef::new(entry_idx)).unwrap();
-        let key_idx = entry.payload["children"][0].as_u64().unwrap() as usize;
-        let key = out.get(AstRef::new(key_idx)).unwrap();
-        assert_eq!(key.payload, json!("__former__"));
+        // Collect the record's entry keys.
+        let mut keys: Vec<String> = Vec::new();
+        for entry_val in value.payload["children"].as_array().unwrap() {
+            let entry = out
+                .get(AstRef::new(entry_val.as_u64().unwrap() as usize))
+                .unwrap();
+            let key_idx = entry.payload["children"][0].as_u64().unwrap() as usize;
+            let key = out.get(AstRef::new(key_idx)).unwrap();
+            keys.push(key.payload.as_str().unwrap().to_string());
+        }
+        for want in ["Zero", "Succ", "rec", "__former__"] {
+            assert!(
+                keys.iter().any(|k| k == want),
+                "family record missing key {want}: {keys:?}"
+            );
+        }
+        // `__term__`/`__bound__` appear only for parametric families.
+        assert!(!keys.iter().any(|k| k == "__term__"));
+        assert!(!keys.iter().any(|k| k == "__bound__"));
     }
 
     #[test]
@@ -3032,11 +3090,10 @@ mod tests {
         let root = out.nodes().last().unwrap();
         let children = root.payload.get("children").unwrap().as_array().unwrap();
 
-        // Last statement: Nat.rec = rec { ... }
+        // The `Nat.rec` assign: `Nat.rec = rec { ... }`
         // (Bug 0.3: recursor is wrapped in a rec region for self-reference)
-        let rec_assign = out
-            .get(AstRef::new(children[3].as_u64().unwrap() as usize))
-            .unwrap();
+        let rec_idx = find_assign(&out, children, "Nat.rec").expect("Nat.rec assign");
+        let rec_assign = out.get(AstRef::new(rec_idx)).unwrap();
         assert_eq!(rec_assign.kind, "assign");
         let rec_children = rec_assign
             .payload
@@ -3061,13 +3118,53 @@ mod tests {
     // ADR-0082 step 3: Termination metadata on recursor's inner function
     // -----------------------------------------------------------------------
 
+    /// Index of the block statement that is `assign` to `target` — the
+    /// desugared `data` block orders ctor assigns first, then `F.rec`,
+    /// then the family record bound to `F` (Design A), so tests locate
+    /// statements by target name rather than position.
+    fn find_assign(out: &Ast, block_children: &[Value], target: &str) -> Option<usize> {
+        for child in block_children {
+            let idx = child.as_u64()? as usize;
+            let node = out.get(AstRef::new(idx))?;
+            if node.kind != "assign" {
+                continue;
+            }
+            let kids = node.payload.get("children")?.as_array()?;
+            let t_idx = kids.first()?.as_u64()? as usize;
+            let t = out.get(AstRef::new(t_idx))?;
+            if t.kind == "var" && t.payload.as_str() == Some(target) {
+                return Some(idx);
+            }
+        }
+        None
+    }
+
+    /// Index of the block statement assigning `F.rec` — the recursor
+    /// assign is the one whose target var ends in `.rec`.
+    fn find_rec_assign(out: &Ast, block_children: &[Value]) -> Option<usize> {
+        for child in block_children {
+            let idx = child.as_u64()? as usize;
+            let node = out.get(AstRef::new(idx))?;
+            if node.kind != "assign" {
+                continue;
+            }
+            let kids = node.payload.get("children")?.as_array()?;
+            let t_idx = kids.first()?.as_u64()? as usize;
+            let t = out.get(AstRef::new(t_idx))?;
+            if t.kind == "var" && t.payload.as_str().is_some_and(|s| s.ends_with(".rec")) {
+                return Some(idx);
+            }
+        }
+        None
+    }
+
     /// Helper: walk the recursor's bound-arrow record to find the dispatch
     /// function `(__in) -> loop(rec_step)` — the function that carries the
     /// `termination` payload (ADR-0120 Phase 1 fold machine). Path:
     /// assign → rec → assign[0] → function → body(object) →
     /// entry[0](`__term__`) → children[1] → function.
     fn recursor_inner_fn<'a>(out: &'a Ast, block_children: &[Value]) -> Option<&'a AstNode> {
-        let rec_assign_idx = block_children.last()?.as_u64()? as usize;
+        let rec_assign_idx = find_rec_assign(out, block_children)?;
         let rec_assign = out.get(AstRef::new(rec_assign_idx))?;
         let rec_children = rec_assign.payload.get("children")?.as_array()?;
         let rec_region_idx = rec_children.get(1)?.as_u64()? as usize;
@@ -3197,10 +3294,11 @@ mod tests {
         assert_eq!(root.kind, "block");
         let children = root.payload.get("children").unwrap().as_array().unwrap();
 
-        // Statement 2: Succ = (pred) -> {"__ctor__": succSym, "pred": pred, "type": …}
-        let succ_assign = out
-            .get(AstRef::new(children[2].as_u64().unwrap() as usize))
-            .unwrap();
+        // The Succ constructor assign: `Succ = (pred) -> {"__ctor__":
+        // succSym, "pred": pred, "type": …}` — ctor assigns run first
+        // under Design A, so `Succ` is found by target name.
+        let succ_idx = find_assign(&out, children, "Succ").expect("Succ assign");
+        let succ_assign = out.get(AstRef::new(succ_idx)).unwrap();
         assert_eq!(succ_assign.kind, "assign");
         let succ_children = succ_assign
             .payload
@@ -3372,10 +3470,10 @@ mod tests {
             );
         }
 
-        // Verify the predicate target is var("Nat").
-        let pred_assign = out
-            .get(AstRef::new(children[0].as_u64().unwrap() as usize))
-            .unwrap();
+        // The family record assign targets `var("Nat")` (last statement —
+        // ctor assigns run first under Design A).
+        let fam_idx = find_assign(&out, children, "Nat").expect("Nat assign");
+        let pred_assign = out.get(AstRef::new(fam_idx)).unwrap();
         let pred_children = pred_assign
             .payload
             .get("children")
@@ -3389,9 +3487,8 @@ mod tests {
         assert_eq!(target.payload, json!("Nat"));
 
         // Verify the Succ constructor has arg name "nat" (lowercased type).
-        let succ_assign = out
-            .get(AstRef::new(children[2].as_u64().unwrap() as usize))
-            .unwrap();
+        let succ_idx = find_assign(&out, children, "Succ").expect("Succ assign");
+        let succ_assign = out.get(AstRef::new(succ_idx)).unwrap();
         let succ_children = succ_assign
             .payload
             .get("children")
@@ -3483,9 +3580,8 @@ mod tests {
         assert_eq!(children.len(), 4);
 
         // Verify the Succ constructor uses "pred" (from hand-built payload).
-        let succ_assign = out
-            .get(AstRef::new(children[2].as_u64().unwrap() as usize))
-            .unwrap();
+        let succ_idx = find_assign(&out, children, "Succ").expect("Succ assign");
+        let succ_assign = out.get(AstRef::new(succ_idx)).unwrap();
         let succ_children = succ_assign
             .payload
             .get("children")
@@ -3548,10 +3644,9 @@ mod tests {
             "expected 4 statements (pred + 2 cons + rec)"
         );
 
-        // The Just constructor (statement 2) should have param "value".
-        let just_assign = out
-            .get(AstRef::new(children[2].as_u64().unwrap() as usize))
-            .unwrap();
+        // The Just constructor assign should have param "value".
+        let just_idx = find_assign(&out, children, "Just").expect("Just assign");
+        let just_assign = out.get(AstRef::new(just_idx)).unwrap();
         assert_eq!(just_assign.kind, "assign");
         let just_children = just_assign
             .payload
@@ -3767,14 +3862,14 @@ mod tests {
     }
 
     /// Extract the recursor's constructor-param count from a desugared
-    /// `data` block. The recursor is the last `assign` in the block; its
+    /// `data` block. The recursor assign targets `F.rec`; its
     /// value is a `rec` region whose first binding (`__rec_inner_<T>`)
     /// holds the outer function `(motive, c0, ..., c_{N-1}) ->
     /// {__term__, __bound__}` (ADR-0120 Phase 1). We walk down:
     /// assign → rec → assign[0] → function → params.len() - 1 (the
     /// leading `motive` param is not a constructor argument).
     fn recursor_param_count(out: &Ast, block_children: &[Value]) -> Option<usize> {
-        let rec_assign_idx = block_children.last()?.as_u64()? as usize;
+        let rec_assign_idx = find_rec_assign(out, block_children)?;
         let rec_assign = out.get(AstRef::new(rec_assign_idx))?;
         let rec_children = rec_assign.payload.get("children")?.as_array()?;
         let rec_region_idx = rec_children.get(1)?.as_u64()? as usize;
